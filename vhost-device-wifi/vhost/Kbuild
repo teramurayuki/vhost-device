@@ -1,0 +1,2 @@
+obj-m := vhost-wifi.o
+vhost-wifi-y := vhost_wifi_ioctls.o vhost_wifi_driver.o
