@@ -1,0 +1,10 @@
+*.log
+nl80211.prev.h
+nl80211.rs
+ieee80211.rs
+ieee80211.h
+iw
+.gdb_history
+data
+*.dat
+*.out

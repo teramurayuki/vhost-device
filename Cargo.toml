@@ -16,6 +16,7 @@ members = [
     "vhost-device-spi",
     "vhost-device-template",
     "vhost-device-vsock",
+    "vhost-device-wifi",
     "xtask",
 ]
 
