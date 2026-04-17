@@ -1,0 +1,28 @@
+.cache
+compile_commands.json
+Module.symvers
+modules.order
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+*.o
+*.cmd
+*.tmp
+*.d
+
+# Development stuff:
+
+mac80211_hwsim.c
+__pycache__
+*.out
+*.log
+# ftrace data:
+*.dat
+captures
+hostap
+wpa-2.10
+wpa_supplicant.conf
+
+vmlinuz*
+initrd*
