@@ -1,0 +1,2 @@
+obj-m := virtio-wifi.o
+virtio-wifi-y := virtio_wifi_msgs.o virtio_wifi_ieee80211.o virtio_wifi_driver.o
