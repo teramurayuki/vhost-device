@@ -30,3 +30,6 @@ managed=0
 trace-cmd record -p function -l '*80211*' -l '*virtio_wifi*' ...
 trace-cmd report | less
 ```
+
+Capture: `airodump-ng -w captures/CAP moni0`
+Decode: `python3 read_pcap.py captures/CAP-04.cap`

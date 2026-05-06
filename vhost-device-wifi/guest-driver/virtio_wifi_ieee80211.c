@@ -33,14 +33,12 @@ static void virtio_wifi_ieee80211_link_info_changed(struct ieee80211_hw *hw,
 				struct ieee80211_vif *vif,
 				u64 changed);
 
-/*
 static int virtio_wifi_ieee80211_hw_scan(struct ieee80211_hw *hw,
 					 struct ieee80211_vif *vif,
 					 struct ieee80211_scan_request *req);
 
 static void virtio_wifi_ieee80211_cancel_hw_scan(struct ieee80211_hw *hw,
 						 struct ieee80211_vif *vif);
-						 */
 
 const struct ieee80211_ops virtio_wifi_ieee80211_ops = {
 	.start = virtio_wifi_ieee80211_start,
@@ -53,10 +51,8 @@ const struct ieee80211_ops virtio_wifi_ieee80211_ops = {
 	.link_info_changed = virtio_wifi_ieee80211_link_info_changed,
 	.vif_cfg_changed = virtio_wifi_ieee80211_vif_cfg_changed,
 	.configure_filter = virtio_wifi_ieee80211_configure_filter,
-	/*
 	 .hw_scan = virtio_wifi_ieee80211_hw_scan, 
 	 .cancel_hw_scan = virtio_wifi_ieee80211_cancel_hw_scan,
-	 */
 	.add_chanctx = ieee80211_emulate_add_chanctx,
 	.remove_chanctx = ieee80211_emulate_remove_chanctx,
 	.change_chanctx = ieee80211_emulate_change_chanctx,
@@ -195,12 +191,14 @@ static void virtio_wifi_ieee80211_configure_filter(struct ieee80211_hw *hw,
 	return;
 }
 
-/*
 static int virtio_wifi_ieee80211_hw_scan(struct ieee80211_hw *hw,
 					 struct ieee80211_vif *vif,
 					 struct ieee80211_scan_request *req)
 {
 	struct virtio_wifi_wiphy *wiphy = hw->priv;
+	struct virtio_wifi_interface *wif = NULL;
+	BUG_ON(!vif);
+	wif = (void *)vif->drv_priv;
 	struct cfg80211_scan_request *cfg80211_req = &req->req;
 
 	printk("%s called\n", __func__);
@@ -209,6 +207,11 @@ static int virtio_wifi_ieee80211_hw_scan(struct ieee80211_hw *hw,
 
 	if (WARN_ON(wiphy->tmp_chan || wiphy->hw_scan_request)) {
 		return -EBUSY;
+	}
+	int ret = virtio_wifi_do_trigger_scan(wiphy, wif->index, cfg80211_req);
+	if (ret) {
+		printk("%s do_trigger_scan returned %d\n", __func__, ret);
+		goto err;
 	}
 	wiphy->hw_scan_request = cfg80211_req;
 	wiphy->hw_scan_vif = vif;
@@ -221,7 +224,8 @@ static int virtio_wifi_ieee80211_hw_scan(struct ieee80211_hw *hw,
 	memset(&wiphy->survey_data, 0, sizeof(wiphy->survey_data));
 
 	ieee80211_queue_delayed_work(wiphy->hw, &wiphy->hw_scan_work, 0);
-	return 0;
+err:
+	return ret;
 }
 
 static void virtio_wifi_ieee80211_cancel_hw_scan(struct ieee80211_hw *hw,
@@ -230,8 +234,6 @@ static void virtio_wifi_ieee80211_cancel_hw_scan(struct ieee80211_hw *hw,
 	printk("%s called\n", __func__);
 	return;
 }
-
-*/
 
 static void virtio_wifi_ieee80211_link_info_changed(struct ieee80211_hw *hw,
 		struct ieee80211_vif *vif,

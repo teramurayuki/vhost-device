@@ -142,7 +142,6 @@ static int virtio_wifi_init_rxq(struct virtio_wifi *virtio_wifi)
 	return 0;
 }
 
-/*
 void virtio_wifi_hw_scan_work(struct work_struct *work)
 {
 	struct virtio_wifi_wiphy *wiphy =
@@ -172,7 +171,6 @@ void virtio_wifi_hw_scan_work(struct work_struct *work)
 	wiphy->scan_chan_idx++;
 	return;
 }
-*/
 
 void virtio_wifi_do_tx_work(struct work_struct *work)
 {

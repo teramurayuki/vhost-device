@@ -474,7 +474,8 @@ int virtio_wifi_do_register_wiphys(struct virtio_wifi *dev)
 	SET_IEEE80211_PERM_ADDR(wiphy->hw, rtlmac1);
 	ieee80211_hw_set(hw, NO_AUTO_VIF);
 
-	/* INIT_DELAYED_WORK(&wiphy->hw_scan_work, virtio_wifi_hw_scan_work); */
+	wiphy->hw->wiphy->max_scan_ssids = 255;
+	INIT_DELAYED_WORK(&wiphy->hw_scan_work, virtio_wifi_hw_scan_work);
 	INIT_DELAYED_WORK(&wiphy->tx_work, virtio_wifi_do_tx_work);
 	wiphy->hw->queues = 5;
 	wiphy_net_set(wiphy->hw->wiphy, &init_net);
@@ -906,4 +907,36 @@ int virtio_wifi_do_set_channel(struct virtio_wifi_wiphy *wiphy,
 finish:
 	virtio_wifi_msg_release(msg);
 	return ret;
+}
+
+int virtio_wifi_do_trigger_scan(struct virtio_wifi_wiphy *wiphy, u32 if_index,
+		      struct cfg80211_scan_request *req)
+
+{
+	struct virtio_wifi *dev;
+	struct virtio_wifi_msg *msg;
+	struct virtio_wifi_hdr *hdr;
+	int ret = 0;
+
+	BUG_ON(!wiphy);
+
+	dev = wiphy->virtio_wifi;
+	printk("%s: Triggering scan on vif %d\n", __func__, if_index);
+
+	msg = virtio_wifi_msg_init(dev, VIRTIO_WIFI_CMD_TRIGGER_SCAN,
+				   sizeof(struct virtio_wifi_hdr),
+				   sizeof(struct virtio_wifi_hdr));
+
+	hdr = msg->req;
+	hdr->index = virtio_cpu_to_le(if_index, hdr->index);
+
+	ret = virtio_wifi_msg_xfer(&dev->controlq, msg, 0);
+	if (ret) {
+		goto finish;
+	}
+
+finish:
+	virtio_wifi_msg_release(msg);
+	return ret;
+
 }

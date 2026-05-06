@@ -74,7 +74,6 @@ struct virtio_wifi_wiphy {
 	struct sk_buff *tx_skb;
 	struct virtio_wifi_interface *tx_wif;
 	/* Fields used for hw scanning */
-	/*
 	struct delayed_work hw_scan_work;
 	struct ieee80211_channel *tmp_chan;
 	struct cfg80211_scan_request *hw_scan_request;
@@ -85,7 +84,6 @@ struct virtio_wifi_wiphy {
 		struct ieee80211_channel *channel;
 		unsigned long next_start, start, end;
 	} survey_data;
-	*/
 };
 
 DEFINE_GUARD(wiphy_mutex, struct virtio_wifi_wiphy *, mutex_lock(&_T->mutex),
@@ -158,6 +156,8 @@ int virtio_wifi_do_configure_filter(struct virtio_wifi *dev, u32 wiphy_idx,
 				    unsigned int *total_flags, u64 multicast);
 int virtio_wifi_do_tx(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 		      struct sk_buff *skb);
+int virtio_wifi_do_trigger_scan(struct virtio_wifi_wiphy *wiphy, u32 if_index,
+		      struct cfg80211_scan_request *req);
 void virtio_wifi_hw_scan_work(struct work_struct *work);
 void virtio_wifi_do_tx_work(struct work_struct *work);
 int virtio_wifi_do_set_channel(struct virtio_wifi_wiphy *wiphy,
