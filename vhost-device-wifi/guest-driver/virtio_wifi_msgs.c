@@ -205,9 +205,9 @@ finish:
 	return ret;
 }
 
-static int virtio_wifi_get_band(struct virtio_wifi *dev, u32 wiphy_idx,
-				enum nl80211_band band_kind,
-				struct virtio_wifi_band *band)
+int virtio_wifi_get_band(struct virtio_wifi *dev, u32 wiphy_idx,
+			 enum nl80211_band band_kind,
+			 struct virtio_wifi_band *band)
 {
 	struct virtio_wifi_msg *msg;
 	struct virtio_wifi_cmd_get_band_request *req;
@@ -244,10 +244,9 @@ finish:
 	return ret;
 }
 
-static int
-virtio_wifi_get_band_bitrate(struct virtio_wifi *dev, u32 wiphy_idx,
-			     enum nl80211_band band_kind, u32 bitrate_idx,
-			     struct virtio_wifi_band_bitrate *bitrate)
+int virtio_wifi_get_band_bitrate(struct virtio_wifi *dev, u32 wiphy_idx,
+				 enum nl80211_band band_kind, u32 bitrate_idx,
+				 struct virtio_wifi_band_bitrate *bitrate)
 {
 	struct virtio_wifi_msg *msg;
 	struct virtio_wifi_cmd_get_band_bitrate_request *req;
@@ -286,10 +285,9 @@ finish:
 	return ret;
 }
 
-static int virtio_wifi_get_band_channel(struct virtio_wifi *dev, u32 wiphy_idx,
-					enum nl80211_band band_kind,
-					u32 channel_idx,
-					struct virtio_wifi_channel *channel)
+int virtio_wifi_get_band_channel(struct virtio_wifi *dev, u32 wiphy_idx,
+				 enum nl80211_band band_kind, u32 channel_idx,
+				 struct virtio_wifi_channel *channel)
 {
 	struct virtio_wifi_msg *msg;
 	struct virtio_wifi_cmd_get_band_channel_request *req;
@@ -333,11 +331,187 @@ finish:
  * Context: Process context.
  * Return: Zero on success, negative error code otherwise.
  */
+/*int virtio_wifi_do_register_wiphys(struct virtio_wifi *dev) */
+/*{ */
+/*	struct virtio_wifi_wiphy *wiphy = NULL; */
+/*	struct virtio_wifi_radio radio = { 0 }; */
+/*	struct ieee80211_hw *hw = NULL; */
+/*	u32 num_of_wiphys = 0; */
+
+/*	int ret; */
+
+/*	virtio_cread_le(dev->virtio_dev, struct virtio_wifi_config, phys, */
+/*			&num_of_wiphys); */
+
+/*	printk("%s: registering %u wiphys\n", __func__, num_of_wiphys); */
+
+/*	if (num_of_wiphys == 0) { */
+/*		return 0; */
+/*	} */
+
+/*	ret = virtio_wifi_get_wiphy(dev, 0, &radio); */
+/*	if (ret) { */
+/*		goto finish; */
+/*	} */
+
+/*	u8 rtlmac1[] = { 0x00, 0xe0, 0x4c, 0x81, 0x92, 0x00 }; */
+
+/*	hw = ieee80211_alloc_hw(sizeof(struct virtio_wifi_wiphy), */
+/*				&virtio_wifi_ieee80211_ops); */
+
+/*	BUG_ON(!hw); */
+/*	wiphy = hw->priv; */
+/*	wiphy->hw = hw; */
+/*	wiphy->virtio_wifi = dev; */
+
+/*	mutex_init(&wiphy->mutex); */
+/*	wiphy->index = virtio_le_to_cpu(radio.hdr.index); */
+/*	wiphy->ifaces = virtio_le_to_cpu(radio.ifaces); */
+/*	for (int band_kind = NL80211_BAND_2GHZ; band_kind < NUM_NL80211_BANDS; */
+/*	     band_kind++) { */
+/*		struct virtio_wifi_band band = { 0 }; */
+
+/*		struct ieee80211_supported_band *sband = */
+/*			&wiphy->bands[band_kind]; */
+
+/*		sband->band = band_kind; */
+
+/*		switch (band_kind) { */
+/*		case NL80211_BAND_2GHZ: */
+/*			break; */
+/*		default: */
+/*			continue; */
+/*		} */
+/*		ret = virtio_wifi_get_band(dev, 0, band_kind, &band); */
+/*		sband->ht_cap.cap = virtio_le_to_cpu(band.ht_cap.cap); */
+/*		sband->ht_cap.ht_supported = */
+/*			virtio_le_to_cpu(band.ht_cap.ht_supported); */
+/*		sband->ht_cap.ampdu_factor = */
+/*			virtio_le_to_cpu(band.ht_cap.ampdu_factor); */
+/*		sband->ht_cap.ampdu_density = */
+/*			virtio_le_to_cpu(band.ht_cap.ampdu_density); */
+/*		sband->ht_cap.mcs.rx_highest = */
+/*			virtio_le_to_cpu(band.ht_cap.mcs.rx_highest); */
+/*		memcpy(sband->ht_cap.mcs.rx_mask, band.ht_cap.mcs.rx_mask, */
+/*		       ARRAY_SIZE(band.ht_cap.mcs.rx_mask)); */
+/*		sband->ht_cap.mcs.tx_params = */
+/*			virtio_le_to_cpu(band.ht_cap.mcs.tx_params); */
+/*		sband->n_channels = virtio_le_to_cpu(band.n_channels); */
+/*		sband->n_bitrates = virtio_le_to_cpu(band.n_bitrates); */
+/*		if (sband->n_channels == 0) { */
+/*			continue; */
+/*		} */
+/*		sband->channels = devm_kzalloc( */
+/*			&dev->virtio_dev->dev, */
+/*			sizeof(struct ieee80211_channel) * sband->n_channels, */
+/*			GFP_KERNEL); */
+
+/*		for (int ch = 0; ch < sband->n_channels; ch++) { */
+/*			struct virtio_wifi_channel channel = { 0 }; */
+/*			ret = virtio_wifi_get_band_channel(dev, 0, band_kind, */
+/*							   ch, &channel); */
+/*			/1* check that channel.band== band_kind ? *1/ */
+/*			sband->channels[ch].band = */
+/*				virtio_le_to_cpu(channel.band); */
+/*			sband->channels[ch].center_freq = */
+/*				virtio_le_to_cpu(channel.center_freq); */
+/*			sband->channels[ch].freq_offset = */
+/*				virtio_le_to_cpu(channel.freq_offset); */
+/*			sband->channels[ch].hw_value = */
+/*				virtio_le_to_cpu(channel.hw_value); */
+/*			sband->channels[ch].flags = */
+/*				virtio_le_to_cpu(channel.flags); */
+/*			sband->channels[ch].max_antenna_gain = */
+/*				virtio_le_to_cpu(channel.max_antenna_gain); */
+/*			sband->channels[ch].max_power = */
+/*				virtio_le_to_cpu(channel.max_power); */
+/*			sband->channels[ch].max_reg_power = */
+/*				virtio_le_to_cpu(channel.max_reg_power); */
+/*			sband->channels[ch].dfs_state_entered = */
+/*				virtio_le_to_cpu(channel.dfs_state_entered); */
+/*			sband->channels[ch].dfs_cac_ms = */
+/*				virtio_le_to_cpu(channel.dfs_cac_ms); */
+/*			sband->channels[ch].beacon_found = channel.beacon_found; */
+/*			sband->channels[ch].psd = channel.psd; */
+/*		} */
+
+/*		sband->bitrates = devm_kzalloc(&dev->virtio_dev->dev, */
+/*					       sizeof(struct ieee80211_rate) * */
+/*						       sband->n_bitrates, */
+/*					       GFP_KERNEL); */
+
+/*		for (int br = 0; br < sband->n_bitrates; br++) { */
+/*			struct virtio_wifi_band_bitrate bitrate = { 0 }; */
+/*			ret = virtio_wifi_get_band_bitrate(dev, 0, band_kind, */
+/*							   br, &bitrate); */
+/*			BUG_ON(ret);  */
+/*			sband->bitrates[br].bitrate = */
+/*				virtio_le_to_cpu(bitrate.bitrate); */
+/*			sband->bitrates[br].flags = */
+/*				virtio_le_to_cpu(bitrate.flags); */
+/*			sband->bitrates[br].hw_value = */
+/*				virtio_le_to_cpu(bitrate.hw_value); */
+/*			sband->bitrates[br].hw_value_short = */
+/*				virtio_le_to_cpu(bitrate.hw_value_short); */
+/*		} */
+
+/*		hw->wiphy->bands[band_kind] = sband; */
+/*	} */
+/*	if (ret) { */
+/*		goto finish; */
+/*	} */
+/*	wiphy->flags = virtio_le_to_cpu(radio.flags); */
+/*	wiphy->hwname_len = virtio_le_to_cpu(radio.hwname_len); */
+/*	strscpy(wiphy->hwname, radio.hwname, sizeof(radio.hwname)); */
+
+/*	wiphy->hw->vif_data_size = sizeof(struct virtio_wifi_interface); */
+
+/*	get_random_bytes((rtlmac1 + (ETH_ALEN - 1)), 1); */
+/*	SET_IEEE80211_PERM_ADDR(wiphy->hw, rtlmac1); */
+/*	ieee80211_hw_set(hw, NO_AUTO_VIF); */
+
+/*	wiphy->hw->wiphy->max_scan_ssids = 255; */
+/*	INIT_DELAYED_WORK(&wiphy->hw_scan_work, virtio_wifi_hw_scan_work); */
+/*	INIT_DELAYED_WORK(&wiphy->tx_work, virtio_wifi_do_tx_work); */
+/*	wiphy->hw->queues = 5; */
+/*	wiphy_net_set(wiphy->hw->wiphy, &init_net); */
+/*	wiphy->hw->wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION); */
+/*	wiphy->hw->wiphy->available_antennas_tx = virtio_le_to_cpu(radio.available_antennas_tx); */
+/*	wiphy->hw->wiphy->available_antennas_rx = virtio_le_to_cpu(radio.available_antennas_rx); */
+
+/*	wiphy->dev = device_create(virtio_wifi_class, NULL, 0, hw, */
+/*				   "virtio_wifi%d", wiphy->index); */
+/*	if (IS_ERR(wiphy->dev)) { */
+/*		printk("%s: device_create failed (%ld)\n", __func__, */
+/*		       PTR_ERR(wiphy->dev)); */
+/*		ret = -ENOMEM; */
+/*		goto finish; */
+/*	} */
+/*	wiphy->dev->driver = &virtio_wifi_platform_driver.driver; */
+/*	ret = device_bind_driver(wiphy->dev); */
+/*	if (ret != 0) { */
+/*		printk("%s: device_bind_driver failed (%d)\n", __func__, ret); */
+/*		goto finish; */
+/*	} */
+/*	SET_IEEE80211_DEV(hw, wiphy->dev); */
+/*	ret = ieee80211_register_hw(hw); */
+/*	if (ret < 0) { */
+/*		printk("%s: ieee80211_register_hw failed (%d)\n", __func__, */
+/*		       ret); */
+/*		goto finish; */
+/*	} */
+/*	spin_lock_bh(&dev->wiphys_lock); */
+/*	list_add_tail(&wiphy->node, &dev->wiphys); */
+/*	spin_unlock_bh(&dev->wiphys_lock); */
+
+/*// FIXME cleanup sequence */
+/*finish: */
+/*	return ret; */
+/*} */
 int virtio_wifi_do_register_wiphys(struct virtio_wifi *dev)
 {
 	struct virtio_wifi_wiphy *wiphy = NULL;
 	struct virtio_wifi_radio radio = { 0 };
-	struct ieee80211_hw *hw = NULL;
 	u32 num_of_wiphys = 0;
 
 	int ret;
@@ -356,154 +530,12 @@ int virtio_wifi_do_register_wiphys(struct virtio_wifi *dev)
 		goto finish;
 	}
 
-	u8 rtlmac1[] = { 0x00, 0xe0, 0x4c, 0x81, 0x92, 0x00 };
-
-	hw = ieee80211_alloc_hw(sizeof(struct virtio_wifi_wiphy),
-				&virtio_wifi_ieee80211_ops);
-
-	BUG_ON(!hw);
-	wiphy = hw->priv;
-	wiphy->hw = hw;
-	wiphy->virtio_wifi = dev;
-
-	mutex_init(&wiphy->mutex);
-	wiphy->index = virtio_le_to_cpu(radio.hdr.index);
-	wiphy->ifaces = virtio_le_to_cpu(radio.ifaces);
-	for (int band_kind = NL80211_BAND_2GHZ; band_kind < NUM_NL80211_BANDS;
-	     band_kind++) {
-		struct virtio_wifi_band band = { 0 };
-
-		struct ieee80211_supported_band *sband =
-			&wiphy->bands[band_kind];
-
-		sband->band = band_kind;
-
-		switch (band_kind) {
-		case NL80211_BAND_2GHZ:
-			break;
-		default:
-			continue;
-		}
-		ret = virtio_wifi_get_band(dev, 0, band_kind, &band);
-		sband->ht_cap.cap = virtio_le_to_cpu(band.ht_cap.cap);
-		sband->ht_cap.ht_supported =
-			virtio_le_to_cpu(band.ht_cap.ht_supported);
-		sband->ht_cap.ampdu_factor =
-			virtio_le_to_cpu(band.ht_cap.ampdu_factor);
-		sband->ht_cap.ampdu_density =
-			virtio_le_to_cpu(band.ht_cap.ampdu_density);
-		sband->ht_cap.mcs.rx_highest =
-			virtio_le_to_cpu(band.ht_cap.mcs.rx_highest);
-		memcpy(sband->ht_cap.mcs.rx_mask, band.ht_cap.mcs.rx_mask,
-		       ARRAY_SIZE(band.ht_cap.mcs.rx_mask));
-		sband->ht_cap.mcs.tx_params =
-			virtio_le_to_cpu(band.ht_cap.mcs.tx_params);
-		/*FIXME*/ BUG_ON(ret);
-		sband->n_channels = virtio_le_to_cpu(band.n_channels);
-		sband->n_bitrates = virtio_le_to_cpu(band.n_bitrates);
-		if (sband->n_channels == 0) {
-			continue;
-		}
-		sband->channels = devm_kzalloc(
-			&dev->virtio_dev->dev,
-			sizeof(struct ieee80211_channel) * sband->n_channels,
-			GFP_KERNEL);
-
-		for (int ch = 0; ch < sband->n_channels; ch++) {
-			struct virtio_wifi_channel channel = { 0 };
-			ret = virtio_wifi_get_band_channel(dev, 0, band_kind,
-							   ch, &channel);
-			/*FIXME*/ BUG_ON(ret);
-			/* check that channel.band== band_kind ? */
-			sband->channels[ch].band =
-				virtio_le_to_cpu(channel.band);
-			sband->channels[ch].center_freq =
-				virtio_le_to_cpu(channel.center_freq);
-			sband->channels[ch].freq_offset =
-				virtio_le_to_cpu(channel.freq_offset);
-			sband->channels[ch].hw_value =
-				virtio_le_to_cpu(channel.hw_value);
-			sband->channels[ch].flags =
-				virtio_le_to_cpu(channel.flags);
-			sband->channels[ch].max_antenna_gain =
-				virtio_le_to_cpu(channel.max_antenna_gain);
-			sband->channels[ch].max_power =
-				virtio_le_to_cpu(channel.max_power);
-			sband->channels[ch].max_reg_power =
-				virtio_le_to_cpu(channel.max_reg_power);
-			sband->channels[ch].dfs_state_entered =
-				virtio_le_to_cpu(channel.dfs_state_entered);
-			sband->channels[ch].dfs_cac_ms =
-				virtio_le_to_cpu(channel.dfs_cac_ms);
-			sband->channels[ch].beacon_found = channel.beacon_found;
-			sband->channels[ch].psd = channel.psd;
-		}
-
-		sband->bitrates = devm_kzalloc(&dev->virtio_dev->dev,
-					       sizeof(struct ieee80211_rate) *
-						       sband->n_bitrates,
-					       GFP_KERNEL);
-
-		for (int br = 0; br < sband->n_bitrates; br++) {
-			struct virtio_wifi_band_bitrate bitrate = { 0 };
-			ret = virtio_wifi_get_band_bitrate(dev, 0, band_kind,
-							   br, &bitrate);
-			/*FIXME*/ BUG_ON(ret);
-			sband->bitrates[br].bitrate =
-				virtio_le_to_cpu(bitrate.bitrate);
-			sband->bitrates[br].flags =
-				virtio_le_to_cpu(bitrate.flags);
-			sband->bitrates[br].hw_value =
-				virtio_le_to_cpu(bitrate.hw_value);
-			sband->bitrates[br].hw_value_short =
-				virtio_le_to_cpu(bitrate.hw_value_short);
-		}
-
-		hw->wiphy->bands[band_kind] = sband;
-	}
-	if (ret) {
+	wiphy = virtio_wifi_cfg80211_make_wiphy(dev, &radio);
+	if (wiphy == NULL) {
+		ret = -ENODEV;
 		goto finish;
 	}
-	wiphy->flags = virtio_le_to_cpu(radio.flags);
-	wiphy->hwname_len = virtio_le_to_cpu(radio.hwname_len);
-	strscpy(wiphy->hwname, radio.hwname, sizeof(radio.hwname));
 
-	wiphy->hw->vif_data_size = sizeof(struct virtio_wifi_interface);
-
-	get_random_bytes((rtlmac1 + (ETH_ALEN - 1)), 1);
-	SET_IEEE80211_PERM_ADDR(wiphy->hw, rtlmac1);
-	ieee80211_hw_set(hw, NO_AUTO_VIF);
-
-	wiphy->hw->wiphy->max_scan_ssids = 255;
-	INIT_DELAYED_WORK(&wiphy->hw_scan_work, virtio_wifi_hw_scan_work);
-	INIT_DELAYED_WORK(&wiphy->tx_work, virtio_wifi_do_tx_work);
-	wiphy->hw->queues = 5;
-	wiphy_net_set(wiphy->hw->wiphy, &init_net);
-	wiphy->hw->wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION);
-	wiphy->hw->wiphy->available_antennas_tx = virtio_le_to_cpu(radio.available_antennas_tx);
-	wiphy->hw->wiphy->available_antennas_rx = virtio_le_to_cpu(radio.available_antennas_rx);
-
-	wiphy->dev = device_create(virtio_wifi_class, NULL, 0, hw,
-				   "virtio_wifi%d", wiphy->index);
-	if (IS_ERR(wiphy->dev)) {
-		printk("%s: device_create failed (%ld)\n", __func__,
-		       PTR_ERR(wiphy->dev));
-		ret = -ENOMEM;
-		goto finish;
-	}
-	wiphy->dev->driver = &virtio_wifi_platform_driver.driver;
-	ret = device_bind_driver(wiphy->dev);
-	if (ret != 0) {
-		printk("%s: device_bind_driver failed (%d)\n", __func__, ret);
-		goto finish;
-	}
-	SET_IEEE80211_DEV(hw, wiphy->dev);
-	ret = ieee80211_register_hw(hw);
-	if (ret < 0) {
-		printk("%s: ieee80211_register_hw failed (%d)\n", __func__,
-		       ret);
-		goto finish;
-	}
 	spin_lock_bh(&dev->wiphys_lock);
 	list_add_tail(&wiphy->node, &dev->wiphys);
 	spin_unlock_bh(&dev->wiphys_lock);
@@ -586,17 +618,55 @@ static inline void iface_from_vif(struct virtio_wifi_interface *iface,
 	memcpy(iface->addr, vif->addr, ARRAY_SIZE(vif->addr));
 }
 
+/* int virtio_wifi_do_add_interface(struct virtio_wifi *dev, u32 wiphy_idx, */
+/* 				 struct ieee80211_vif *vif) */
+/* { */
+/* 	struct virtio_wifi_msg *msg; */
+/* 	struct virtio_wifi_hdr *req; */
+/* 	struct virtio_wifi_interface *wif = (void *)vif->drv_priv; */
+/* 	iface_from_vif(wif, vif); */
+
+/* 	int ret = 0; */
+
+/* 	BUG_ON(!dev || !vif); */
+
+/* 	printk("%s: adding interface to wiphy %u\n", __func__, wiphy_idx); */
+
+/* 	msg = virtio_wifi_msg_init(dev, VIRTIO_WIFI_CMD_ADD_INTERFACE, */
+/* 				   sizeof(struct virtio_wifi_interface), */
+/* 				   sizeof(struct virtio_wifi_interface)); */
+
+/* 	req = msg->req; */
+/* 	memcpy(msg->req, wif, sizeof(struct virtio_wifi_interface)); */
+/* 	req->index = virtio_cpu_to_le(wiphy_idx, req->index); */
+/* 	// FIXME: prepopulate msg->req? */
+/* 	req->code = virtio_cpu_to_le(VIRTIO_WIFI_CMD_ADD_INTERFACE, req->code); */
+/* 	ret = virtio_wifi_msg_xfer(&dev->controlq, msg, 0); */
+/* 	if (ret) { */
+/* 		goto finish; */
+/* 	} */
+
+/* 	memcpy(wif, msg->resp, sizeof(struct virtio_wifi_interface)); */
+/* 	printk("%s: wiphy %u created vif %u type %d\n", __func__, wiphy_idx, */
+/* 	       wif->index, vif->type); */
+/* 	memcpy(vif->addr, wif->addr, ARRAY_SIZE(wif->addr)); */
+/* 	vif->driver_flags = virtio_le_to_cpu(wif->driver_flags); */
+/* 	/1* vif_from_iface(vif, wif); *1/ */
+/* finish: */
+/* 	virtio_wifi_msg_release(msg); */
+/* 	return ret; */
+/* } */
 int virtio_wifi_do_add_interface(struct virtio_wifi *dev, u32 wiphy_idx,
-				 struct ieee80211_vif *vif)
+enum nl80211_iftype type,
+				 struct net_device *ndev, u32 *if_index)
 {
 	struct virtio_wifi_msg *msg;
 	struct virtio_wifi_hdr *req;
-	struct virtio_wifi_interface *wif = (void *)vif->drv_priv;
-	iface_from_vif(wif, vif);
-
+	struct virtio_wifi_interface *wif;
+	u8 addr[ETH_ALEN] = { 0 };
 	int ret = 0;
 
-	BUG_ON(!dev || !vif);
+	BUG_ON(!dev || !ndev);
 
 	printk("%s: adding interface to wiphy %u\n", __func__, wiphy_idx);
 
@@ -605,20 +675,25 @@ int virtio_wifi_do_add_interface(struct virtio_wifi *dev, u32 wiphy_idx,
 				   sizeof(struct virtio_wifi_interface));
 
 	req = msg->req;
-	memcpy(msg->req, wif, sizeof(struct virtio_wifi_interface));
 	req->index = virtio_cpu_to_le(wiphy_idx, req->index);
-	// FIXME: prepopulate msg->req?
-	req->code = virtio_cpu_to_le(VIRTIO_WIFI_CMD_ADD_INTERFACE, req->code);
+	wif = msg->req;
+	wif->iftype = virtio_cpu_to_le(type, wif->iftype);
+	eth_random_addr(addr);
+	ether_addr_copy(wif->addr, addr);
+
 	ret = virtio_wifi_msg_xfer(&dev->controlq, msg, 0);
 	if (ret) {
 		goto finish;
 	}
 
-	memcpy(wif, msg->resp, sizeof(struct virtio_wifi_interface));
+	wif = msg->resp;
 	printk("%s: wiphy %u created vif %u type %d\n", __func__, wiphy_idx,
-	       wif->index, vif->type);
-	memcpy(vif->addr, wif->addr, ARRAY_SIZE(wif->addr));
-	vif->driver_flags = virtio_le_to_cpu(wif->driver_flags);
+	       wif->index, type);
+	*if_index = virtio_le_to_cpu(wif->index); 
+
+	ether_addr_copy(addr, wif->addr);
+	eth_hw_addr_set(ndev, addr);
+	/* wif->driver_flags = virtio_le_to_cpu(wif->driver_flags); */
 	/* vif_from_iface(vif, wif); */
 finish:
 	virtio_wifi_msg_release(msg);
@@ -626,29 +701,27 @@ finish:
 }
 
 int virtio_wifi_do_remove_interface(struct virtio_wifi *dev, u32 wiphy_idx,
-				    struct ieee80211_vif *vif)
+				    u32 if_index)
 {
 	struct virtio_wifi_msg *msg;
 	struct virtio_wifi_hdr *req;
-	struct virtio_wifi_interface *wif =
-		(struct virtio_wifi_interface *)vif->drv_priv;
+	struct virtio_wifi_interface *ifreq;
 	int ret = 0;
 
-	BUG_ON(!dev || !vif);
+	BUG_ON(!dev);
 
-	printk("%s: removing interface %u to wiphy %u\n", __func__, wif->index,
+	printk("%s: removing interface %u to wiphy %u\n", __func__, if_index,
 	       wiphy_idx);
 
 	msg = virtio_wifi_msg_init(dev, VIRTIO_WIFI_CMD_REMOVE_INTERFACE,
 				   sizeof(struct virtio_wifi_interface),
 				   sizeof(struct virtio_wifi_hdr));
 
-	memcpy(msg->req, vif->drv_priv, sizeof(struct virtio_wifi_interface));
 	req = msg->req;
 	req->index = virtio_cpu_to_le(wiphy_idx, req->index);
-	// FIXME: prepopulate msg->req?
-	req->code =
-		virtio_cpu_to_le(VIRTIO_WIFI_CMD_REMOVE_INTERFACE, req->code);
+	ifreq = msg->req;
+
+	ifreq->index = virtio_cpu_to_le(if_index, ifreq->index);
 
 	ret = virtio_wifi_msg_xfer(&dev->controlq, msg, 0);
 	if (ret) {
@@ -656,7 +729,7 @@ int virtio_wifi_do_remove_interface(struct virtio_wifi *dev, u32 wiphy_idx,
 	}
 
 	printk("%s: wiphy %u removed vif %u\n", __func__, wiphy_idx,
-	       wif->index);
+	       if_index);
 finish:
 	virtio_wifi_msg_release(msg);
 	return ret;
@@ -868,7 +941,7 @@ static inline const char *chan_width_s(enum nl80211_chan_width w)
 };
 
 int virtio_wifi_do_set_channel(struct virtio_wifi_wiphy *wiphy,
-				struct cfg80211_chan_def *chandef)
+			       struct cfg80211_chan_def *chandef)
 {
 	struct virtio_wifi *dev;
 	struct virtio_wifi_msg *msg;
@@ -910,7 +983,7 @@ finish:
 }
 
 int virtio_wifi_do_trigger_scan(struct virtio_wifi_wiphy *wiphy, u32 if_index,
-		      struct cfg80211_scan_request *req)
+				struct cfg80211_scan_request *req)
 
 {
 	struct virtio_wifi *dev;
@@ -938,5 +1011,4 @@ int virtio_wifi_do_trigger_scan(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 finish:
 	virtio_wifi_msg_release(msg);
 	return ret;
-
 }

@@ -142,36 +142,6 @@ static int virtio_wifi_init_rxq(struct virtio_wifi *virtio_wifi)
 	return 0;
 }
 
-void virtio_wifi_hw_scan_work(struct work_struct *work)
-{
-	struct virtio_wifi_wiphy *wiphy =
-		container_of(work, struct virtio_wifi_wiphy, hw_scan_work.work);
-	struct cfg80211_scan_request *req = wiphy->hw_scan_request;
-
-	printk("%s called\n", __func__);
-
-	guard(wiphy_mutex)(wiphy);
-
-	if (wiphy->scan_chan_idx >= req->n_channels) {
-		struct cfg80211_scan_info info = {
-			.aborted = false,
-		};
-
-		ieee80211_scan_completed(wiphy->hw, &info);
-		wiphy->hw_scan_request = NULL;
-		wiphy->hw_scan_vif = NULL;
-		wiphy->tmp_chan = NULL;
-		return;
-	}
-	printk("%s hw scan %d MHz\n", __func__,
-	       req->channels[wiphy->scan_chan_idx]->center_freq);
-	ieee80211_queue_delayed_work(wiphy->hw, &wiphy->hw_scan_work,
-				     msecs_to_jiffies(30));
-	wiphy->survey_data.channel = wiphy->tmp_chan;
-	wiphy->scan_chan_idx++;
-	return;
-}
-
 void virtio_wifi_do_tx_work(struct work_struct *work)
 {
 	struct virtio_wifi_wiphy *wiphy =
@@ -246,8 +216,95 @@ static void eventq_callback(struct virtqueue *queue)
 	schedule_work(&vv->eventq_work);
 }
 
-static void virtio_wifi_process_events(struct virtio_wifi *vv)
+static void virtio_wifi_process_event_buf(struct virtio_wifi *virtio_wifi,
+				       void *data, int len)
 {
+	struct virtio_wifi_event *event = data;
+	u32 code = virtio_le_to_cpu(event->code);
+	struct virtio_wifi_wiphy *w, *n;
+
+	switch (code) {
+		case VIRTIO_WIFI_EVENT_CODE_SCAN_RESULT:
+	case VIRTIO_WIFI_EVENT_CODE_END_SCAN:
+	case VIRTIO_WIFI_EVENT_CODE_CANCEL_SCAN:
+			break;
+	default:
+			// TODO print err
+			return;
+	}
+
+	spin_lock_bh(&virtio_wifi->wiphys_lock);
+	// step 1 find wiphy based on index
+	list_for_each_entry_safe(w, n, &virtio_wifi->wiphys, node) {
+	switch (code) {
+		case VIRTIO_WIFI_EVENT_CODE_SCAN_RESULT:
+			struct virtio_wifi_scan_result *bss = data;
+			size_t ie_len = bss->ielen;
+			virtio_wifi_cfg80211_inform_bss(w->wiphy, data, (data + sizeof(struct virtio_wifi_scan_result)), ie_len);
+
+			break;
+	case VIRTIO_WIFI_EVENT_CODE_END_SCAN:
+			virtio_wifi_cfg80211_scan_done(w->wiphy);
+			break;
+	case VIRTIO_WIFI_EVENT_CODE_CANCEL_SCAN:
+			virtio_wifi_cfg80211_cancel_scan(w->wiphy);
+			break;
+	default:
+			// TODO print err
+			return;
+	}
+		break;
+	}
+	spin_unlock_bh(&virtio_wifi->wiphys_lock);
+
+	return;
+}
+
+static void virtio_wifi_process_events(struct virtio_wifi *virtio_wifi)
+{
+	unsigned int len;
+	void *token;
+	struct virtio_wifi_vq *eventq = &virtio_wifi->eventq;
+	unsigned long flags;
+	bool notify;
+
+	printk("%s called\n", __func__);
+process_bufs:
+	while ((token = virtqueue_get_buf(eventq->vq, &len))) {
+		printk("%s got event buf %u bytes\n", __func__, len);
+		if (len >= sizeof(struct virtio_wifi_event)) {
+			virtio_wifi_process_event_buf(virtio_wifi, token, len);
+		} else {
+			printk("%s got event buf %u bytes < sizeof(struct virtio_wifi_event)\n",
+			       __func__, len);
+		}
+
+		spin_lock_irqsave(&eventq->lock, flags);
+		notify = virtqueue_kick_prepare(eventq->vq);
+		/* spin_unlock_irqrestore(&rxq->lock, flags); */
+
+		if (virtio_wifi_feed_vq(virtio_wifi, eventq->vq, token, BUF_CAP,
+					token)) {
+			printk("%s: failed to re-expose event buffer\n",
+			       __func__);
+			dev_warn(&virtio_wifi->virtio_dev->dev,
+				 "%s: failed to re-expose event buffer\n",
+				 __func__);
+		}
+
+		notify = virtqueue_kick_prepare(eventq->vq);
+
+		spin_unlock_irqrestore(&eventq->lock, flags);
+
+		if (notify)
+			virtqueue_notify(eventq->vq);
+	}
+
+	if (!virtqueue_enable_cb(eventq->vq)) {
+		virtqueue_disable_cb(eventq->vq);
+		goto process_bufs;
+	}
+
 }
 
 static void virtio_wifi_event_work(struct work_struct *work)
@@ -377,11 +434,92 @@ process_bufs:
 	}
 }
 
+static int virtio_wifi_init_eventq(struct virtio_wifi *virtio_wifi, u32 num_elems, size_t buf_cap)
+{
+	void **buf_list;
+	struct device *dev = &virtio_wifi->virtio_dev->dev;
+	void *buf;
+	int ret = 0;
+	size_t bytes = 0;
+size_t i = 0;
+
+	if (num_elems == 0)
+		return -ENOSPC;
+
+	if (unlikely(check_mul_overflow(num_elems, sizeof(buf), &bytes)))
+		return -ENOMEM;
+
+	buf_list = devm_kmalloc(dev, bytes, GFP_KERNEL);
+	if (!buf_list)
+		return -ENOMEM;
+
+	virtio_wifi->eventq_bufs = buf_list;
+	virtio_wifi->num_eventq_bufs = num_elems;
+
+	for (i = 0; i < num_elems; i++) {
+		buf = devm_kzalloc(dev, buf_cap, GFP_KERNEL);
+		if (!buf)
+		{
+			ret = -ENOMEM;
+			goto err;
+		}
+
+		buf_list[i] = buf;
+	}
+	goto finish;
+
+err:
+	for (size_t n = 0; n < i; n++) {
+		if (buf_list[n]) {
+			devm_kfree(dev, buf_list[n]);
+		}
+	}
+
+finish:
+	return ret;
+}
+
+static int virtio_wifi_populate_eventqvq(struct virtio_wifi *virtio_wifi, u32 buf_cap,
+				   bool lock)
+{
+	unsigned int num_elems, i;
+	struct virtio_wifi_vq *virtio_wifi_vq = &virtio_wifi->eventq;
+	struct virtqueue *vq;
+	unsigned long flags;
+	void *buf;
+	int ret;
+
+	num_elems = virtio_wifi->num_eventq_bufs;
+	vq = virtio_wifi_vq->vq;
+
+	for (i = 0; i < num_elems; i++) {
+		buf = virtio_wifi->eventq_bufs[i];
+
+		if (lock) {
+			spin_lock_irqsave(&virtio_wifi_vq->lock, flags);
+
+			ret = virtio_wifi_feed_vq(virtio_wifi, vq, buf, buf_cap,
+						  buf);
+
+			spin_unlock_irqrestore(&virtio_wifi_vq->lock, flags);
+		} else {
+			ret = virtio_wifi_feed_vq(virtio_wifi, vq, buf, buf_cap,
+						  buf);
+		}
+
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
+
 static int virtio_wifi_probe(struct virtio_device *virtio_dev)
 {
 	struct device *dev = &virtio_dev->dev;
 	struct virtqueue *vqs[VIRTIO_WIFI_VQ_MAX];
-	struct virtio_wifi_vq *rxq;
+	struct virtio_wifi_vq *rxq, *eventq;
 	struct virtio_wifi *vv;
 	int ret;
 	unsigned long flags;
@@ -475,6 +613,7 @@ static int virtio_wifi_probe(struct virtio_device *virtio_dev)
 	virtio_wifi_do_register_wiphys(vv);
 
 	rxq = &vv->rxq;
+	eventq = &vv->eventq;
 	ret = virtio_wifi_populate_vq(vv, BUF_CAP, true);
 	if (ret)
 		goto err_after_ready;
@@ -487,6 +626,27 @@ static int virtio_wifi_probe(struct virtio_device *virtio_dev)
 		ret = -EIO;
 		goto err_after_ready;
 	}
+
+	ret = virtio_wifi_init_eventq(vv, virtqueue_get_vring_size(vv->eventq.vq), BUF_CAP);
+	if (ret) {
+		goto err_after_ready;
+	}
+	ret = virtio_wifi_populate_eventqvq(vv, BUF_CAP, true);
+
+	spin_lock_irqsave(&eventq->lock, flags);
+	notify = virtqueue_kick_prepare(eventq->vq);
+	spin_unlock_irqrestore(&eventq->lock, flags);
+
+	if (notify && !virtqueue_notify(eventq->vq)) {
+		ret = -EIO;
+		goto err_after_ready;
+	}
+
+	ret = virtio_wifi_cfg80211_init_module(vv);
+	if (ret) {
+		goto err_after_ready;
+	}
+
 
 	return 0;
 
@@ -518,12 +678,12 @@ static void virtio_wifi_remove(struct virtio_device *virtio_dev)
 		spin_unlock_bh(&vv->wiphys_lock);
 		device_release_driver(wiphy->dev);
 		device_destroy(virtio_wifi_class, 0);
-		ieee80211_unregister_hw(wiphy->hw);
-		ieee80211_free_hw(wiphy->hw);
+		virtio_wifi_cfg80211_destroy_wiphy(wiphy->wiphy);
 		spin_lock_bh(&vv->wiphys_lock);
 	}
 	spin_unlock_bh(&vv->wiphys_lock);
 
+	virtio_wifi_cfg80211_cleanup_module();
 	virtio_reset_device(virtio_dev);
 
 	virtio_dev->config->del_vqs(virtio_dev);

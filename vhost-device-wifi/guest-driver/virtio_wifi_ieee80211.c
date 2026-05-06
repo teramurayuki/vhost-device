@@ -25,13 +25,12 @@ static void virtio_wifi_ieee80211_configure_filter(struct ieee80211_hw *hw,
 						   unsigned int changed_flags,
 						   unsigned int *total_flags,
 						   u64 multicast);
-static void virtio_wifi_ieee80211_link_info_changed(struct ieee80211_hw *hw,
-		struct ieee80211_vif *vif,
-		struct ieee80211_bss_conf *info,
-		u64 changed);
-	static void virtio_wifi_ieee80211_vif_cfg_changed(struct ieee80211_hw *hw,
-				struct ieee80211_vif *vif,
-				u64 changed);
+static void virtio_wifi_ieee80211_link_info_changed(
+	struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+	struct ieee80211_bss_conf *info, u64 changed);
+static void virtio_wifi_ieee80211_vif_cfg_changed(struct ieee80211_hw *hw,
+						  struct ieee80211_vif *vif,
+						  u64 changed);
 
 static int virtio_wifi_ieee80211_hw_scan(struct ieee80211_hw *hw,
 					 struct ieee80211_vif *vif,
@@ -51,8 +50,8 @@ const struct ieee80211_ops virtio_wifi_ieee80211_ops = {
 	.link_info_changed = virtio_wifi_ieee80211_link_info_changed,
 	.vif_cfg_changed = virtio_wifi_ieee80211_vif_cfg_changed,
 	.configure_filter = virtio_wifi_ieee80211_configure_filter,
-	 .hw_scan = virtio_wifi_ieee80211_hw_scan, 
-	 .cancel_hw_scan = virtio_wifi_ieee80211_cancel_hw_scan,
+	.hw_scan = virtio_wifi_ieee80211_hw_scan,
+	.cancel_hw_scan = virtio_wifi_ieee80211_cancel_hw_scan,
 	.add_chanctx = ieee80211_emulate_add_chanctx,
 	.remove_chanctx = ieee80211_emulate_remove_chanctx,
 	.change_chanctx = ieee80211_emulate_change_chanctx,
@@ -235,19 +234,18 @@ static void virtio_wifi_ieee80211_cancel_hw_scan(struct ieee80211_hw *hw,
 	return;
 }
 
-static void virtio_wifi_ieee80211_link_info_changed(struct ieee80211_hw *hw,
-		struct ieee80211_vif *vif,
-		struct ieee80211_bss_conf *info,
-		u64 changed)
+static void virtio_wifi_ieee80211_link_info_changed(
+	struct ieee80211_hw *hw, struct ieee80211_vif *vif,
+	struct ieee80211_bss_conf *info, u64 changed)
 {
-
 	printk("%s called changed %llu\n", __func__, changed);
 	return;
 }
 
 static void virtio_wifi_ieee80211_vif_cfg_changed(struct ieee80211_hw *hw,
-		struct ieee80211_vif *vif,
-		u64 changed){
+						  struct ieee80211_vif *vif,
+						  u64 changed)
+{
 	printk("%s called changed %llu\n", __func__, changed);
 	return;
 }

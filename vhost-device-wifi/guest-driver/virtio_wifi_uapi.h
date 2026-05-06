@@ -403,6 +403,41 @@ struct virtio_wifi_configure_filter {
 static const int _is_padded___________ =
 	sizeof(struct virtio_wifi_configure_filter) != 0;
 
+enum virtio_wifi_event_code {
+	VIRTIO_WIFI_EVENT_CODE_SCAN_RESULT = 0,
+	VIRTIO_WIFI_EVENT_CODE_END_SCAN,
+	VIRTIO_WIFI_EVENT_CODE_CANCEL_SCAN,
+};
+
+struct virtio_wifi_event {
+	__le32 code;
+	__le32 ifindex;
+};
+
+struct virtio_wifi_scan_result {
+	struct virtio_wifi_event hdr;
+	/* struct cfg80211_inform_bss *data, */
+	/* frame type (if known) enum cfg80211_bss_frame_type */
+	/* @tsf: the TSF sent by the peer in the beacon/probe response (or 0) */
+	__le64 tsf;
+	__le32 ftype;
+	/* @capability: the capability field sent by the peer */
+	__le16 capability;
+	/* the beacon interval announced by the peer */
+	__le16 beacon_interval;
+	/* ielen: length of the additional IEs */
+	__le32 band;
+	__le32 center_freq;
+	__le16 hw_value;
+#define ETH_ALEN 6 /* Octets in one ethernet addr	 */
+	__u8 bssid[ETH_ALEN];
+	__le32 padding;
+	__le32 signal;
+	__le64 ielen;
+};
+
+static const int _is_padded____________ =
+	sizeof(struct virtio_wifi_scan_result) != 0;
 #pragma GCC diagnostic pop
 
 #endif /* VIRTIO_WIFI_IF_H */
