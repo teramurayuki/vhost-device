@@ -7,6 +7,7 @@
 #include <linux/math64.h>
 #include <linux/module.h>
 #include <linux/version.h>
+#include <linux/skbuff.h>
 
 #include "virtio_wifi.h"
 
@@ -645,6 +646,7 @@ virtio_wifi_cfg80211_make_wiphy(struct virtio_wifi *virtio_wifi,
 	priv->being_deleted = false;
 	priv->scan_request = NULL;
 	INIT_DELAYED_WORK(&priv->tx_work, virtio_wifi_do_tx_work);
+	skb_queue_head_init(&priv->tx_list);
 
 	err = wiphy_register(wiphy);
 	if (err < 0) {
@@ -689,7 +691,7 @@ static netdev_tx_t virtio_wifi_cfg80211_start_xmit(struct sk_buff *skb,
 	/* 	return NET_XMIT_DROP; */
 	/* } */
 	priv->tx_if = vif->index;
-	priv->tx_skb = skb;
+	skb_queue_tail(&priv->tx_list, skb);
 	skb->dev = vif->ndev;
 
 	schedule_delayed_work(&priv->tx_work, 0);

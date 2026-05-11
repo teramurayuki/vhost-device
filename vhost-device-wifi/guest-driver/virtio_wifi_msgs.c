@@ -579,10 +579,6 @@ int virtio_wifi_do_tx(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 
 	BUG_ON(!dev || !skb);
 
-	/* printk("%s: bytes=%d datalen=%d truesize=%d skb_end_offset=%d\n", */
-	/*        __func__, skb->len, skb->data_len, skb->truesize, */
-	/*        skb_end_offset(skb)); */
-
 	msg = virtio_wifi_msg_init(dev, 0, sizeof(struct virtio_wifi_hdr),
 				   sizeof(struct virtio_wifi_hdr));
 
@@ -615,6 +611,10 @@ int virtio_wifi_do_tx(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 	/* sg_init_one(data_out_sg, skb->head, skb_end_offset(skb)); */
 	/* num_sg = skb_to_sgvec(skb, &data_out_sg[0], 0, skb->len); */
 	sg_init_one(in_sg, msg->resp, msg->resp_cap);
+
+	printk("%s: bytes=%d datalen=%d truesize=%d skb_end_offset=%d num_sg=%d\n",
+	       __func__, skb->len, skb->data_len, skb->truesize,
+	       skb_end_offset(skb), num_sg);
 
 	spin_lock_irqsave(&vq->lock, flags);
 

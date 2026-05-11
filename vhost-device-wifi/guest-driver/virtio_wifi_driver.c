@@ -154,11 +154,14 @@ void virtio_wifi_do_tx_work(struct work_struct *work)
 	guard(wiphy_mutex)(wiphy);
 
 	if_index = wiphy->tx_if;
-	skb = wiphy->tx_skb;
+	skb = skb_dequeue(&wiphy->tx_list);
+
+	if (skb == NULL) {
+		return;
+	}
 
 	wiphy->tx_if = 0;
 	wiphy->tx_control = NULL;
-	wiphy->tx_skb = NULL;
 
 	BUG_ON(skb == NULL);
 	int ret = virtio_wifi_do_tx(wiphy, if_index, skb);

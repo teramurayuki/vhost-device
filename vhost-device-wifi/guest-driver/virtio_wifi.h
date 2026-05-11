@@ -78,7 +78,7 @@ struct virtio_wifi_wiphy {
 	/* Fields for tx delayed work */
 	struct delayed_work tx_work;
 	struct ieee80211_tx_control *tx_control;
-	struct sk_buff *tx_skb;
+	struct sk_buff_head tx_list;
 	u32 tx_if;
 	// Fullmac
 	struct cfg80211_scan_request *scan_request;
