@@ -395,7 +395,7 @@ static void virtio_wifi_cfg80211_connect_complete(struct work_struct *work)
 
 	/* Schedules an event that acquires the rtnl lock. */
 	cfg80211_connect_result(vif->ndev,
-				/* vif->is_connected ? fake_router_bssid : */ NULL,
+				vif->is_connected ? requested_bss : NULL,
 				NULL, 0, NULL, 0, status, GFP_KERNEL);
 }
 
