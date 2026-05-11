@@ -1392,7 +1392,6 @@ impl TryFrom<NlMessage> for Interface {
             .unwrap()
             .try_into()
             .unwrap();
-        // dbg!(&attr_handles);
         Ok(Self {
             name,
             index,
@@ -1552,7 +1551,7 @@ impl Nl80211Socket {
                     Nl80211Attribute,
                     NoUserHeader,
                 >>() {
-                    log::debug!("mcast {msg:?}");
+                    // log::trace!("mcast {msg:?}");
                     let Ok(msg) = msg else {
                         break;
                     };
@@ -1625,7 +1624,7 @@ impl Nl80211Socket {
                                 .and_then(|t| t.get_payload_as::<u32>().ok())
                                 .unwrap();
                             _if_index = Some(if_index);
-                            let wdev = attr_handles
+                            let _wdev = attr_handles
                                 .extract_if(.., |attr| {
                                     matches!(attr.nla_type().nla_type(), Nl80211Attribute::WDev)
                                 })
@@ -1651,7 +1650,12 @@ impl Nl80211Socket {
                             .as_slice()
                             .to_vec();
                             result.extend(&bss.information_elements);
-                            event_sender.send(result).unwrap();
+                            while let Err(std::sync::mpsc::SendError(again)) =
+                                event_sender.send(result)
+                            {
+                                result = again;
+                                log::error!("Send error!");
+                            }
                             event_fd.write(1).unwrap();
                         }
                         event_sender
@@ -2039,7 +2043,7 @@ impl Nl80211Socket {
             ),
         )?;
         let _recv = recv.into_iter().collect::<Result<Vec<NlMessage>, _>>()?;
-        dbg!(&_recv);
+        // dbg!(&_recv);
         Ok(())
     }
 }

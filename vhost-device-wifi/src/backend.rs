@@ -63,6 +63,7 @@ pub struct VhostUserWifiBackend {
     interfaces: BTreeMap<u32, Interface>,
     io_data: crate::io::IoWorkerData,
     io_data_status_sender: std::sync::mpsc::Sender<crate::io::StatusCommand>,
+    data_seqno: usize,
     socket: Nl80211Socket,
     exit_consumer: EventConsumer,
     pub(crate) exit_notifier: EventNotifier,
@@ -101,6 +102,7 @@ impl VhostUserWifiBackend {
             interfaces: BTreeMap::new(),
             io_data,
             io_data_status_sender,
+            data_seqno: 0,
             socket,
             virtio_cfg,
             exit_consumer,
@@ -610,12 +612,12 @@ impl VhostUserWifiBackend {
                 }
                 virtio_wifi::VIRTIO_WIFI_CMD_TRIGGER_SCAN => {
                     let index = u32::from(request.index);
-                    log::debug!("VIRTIO_WIFI_CMD_TRIGGER_SCAN iface={index}");
+                    // log::trace!("VIRTIO_WIFI_CMD_TRIGGER_SCAN iface={index}");
                     if self.interfaces.contains_key(&index) {
                         let code = match self.socket.trigger_scan(index) {
                             Ok(()) => virtio_wifi::VIRTIO_WIFI_S_OK.into(),
                             Err(err) => {
-                                log::debug!("set channel error: {err}");
+                                log::error!("trigger scan error: {err}");
                                 virtio_wifi::VIRTIO_WIFI_S_IO_ERR.into()
                             }
                         };
@@ -739,6 +741,15 @@ impl VhostUserWifiBackend {
                         virtio_wifi::VIRTIO_WIFI_S_IO_ERR.into()
                     } else {
                         log::debug!("txq wrote: {} bytes", buffer.len());
+                        let data_seqno = self.data_seqno;
+                        std::thread::spawn(move || {
+                            std::fs::write(
+                                std::path::Path::new("./data/tx").join(data_seqno.to_string()),
+                                &buffer,
+                            )
+                            .unwrap();
+                        });
+                        self.data_seqno += 1;
                         virtio_wifi::VIRTIO_WIFI_S_OK.into()
                     };
                     writer

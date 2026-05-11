@@ -275,7 +275,6 @@ fn feed_eventq(buffer: Buffer, event: Vec<u8>) {
     let mut writer = buffer.desc_chain.clone().writer(mem).unwrap();
     use std::io::Write;
     let len = event.len();
-    log::debug!("event bytes len = {len}");
     writer.write_all(&event).unwrap();
 
     let used_len = writer.bytes_written();
@@ -589,16 +588,16 @@ impl IoWorkerData {
                     //     Ok(read) => read,
                     //     Err(Errno::ENETDOWN) => {
                     //         // Ignore, guest might have brought interface down.
-                    //         // TODO: maybe create ENETDOWN event to guest.
+                    //         // TODO: maybe create ENETDOWN event to guest?
                     //         continue;
                     //     }
                     //     Err(err) => {
                     //         panic!("{err}");
                     //     }
                     // };
-                    // if !started {
-                    //     continue;
-                    // }
+                    if !started {
+                        continue;
+                    }
 
                     assert_eq!(packet_data.tp_len as usize, read.bytes);
                     let read = read.bytes.min(packet_data.tp_len as usize);
