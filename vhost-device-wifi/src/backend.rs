@@ -728,6 +728,18 @@ impl VhostUserWifiBackend {
                 .read_exact(&mut buffer)
                 .map_err(|_| Error::DescriptorReadFailed)?;
 
+            match ::libwifi::parse_frame(&buffer, false) {
+                Ok(frame) => {
+                    log::debug!("Got 802.11 TX frame: {frame:?}");
+                }
+                Err(_err) => match etherparse::PacketHeaders::from_ethernet_slice(&buffer) {
+                    Err(err) => log::debug!("Error during parsing TX:\n{err:?}"),
+                    Ok(frame) => {
+                        log::debug!("Got TX 802.3 frame: {frame:?}");
+                    }
+                },
+            };
+
             match self
                 .io_data
                 .ifsockets

@@ -66,6 +66,10 @@ struct virtio_wifi_wiphy {
 	struct device *dev;
 	struct mutex mutex;
 	struct list_head node;
+	/* Fields for eventq delayed work */
+	spinlock_t event_work_lock;
+	struct list_head events_list;
+	struct delayed_work events_work;
 	/* Fields for rx delayed work */
 	struct scatterlist sg[MAX_SKB_FRAGS + 2];
 	spinlock_t rx_work_lock;
@@ -75,7 +79,7 @@ struct virtio_wifi_wiphy {
 	struct delayed_work tx_work;
 	struct ieee80211_tx_control *tx_control;
 	struct sk_buff *tx_skb;
-	struct virtio_wifi_interface *tx_wif;
+	u32 tx_if;
 	// Fullmac
 	struct cfg80211_scan_request *scan_request;
 	bool being_deleted;

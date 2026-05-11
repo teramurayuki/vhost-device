@@ -146,31 +146,31 @@ void virtio_wifi_do_tx_work(struct work_struct *work)
 {
 	struct virtio_wifi_wiphy *wiphy =
 		container_of(work, struct virtio_wifi_wiphy, tx_work.work);
-	struct virtio_wifi_interface *wif = NULL;
+	u32 if_index = 0;
 	struct sk_buff *skb = NULL;
 
 	printk("%s called\n", __func__);
 
 	guard(wiphy_mutex)(wiphy);
 
-	wif = wiphy->tx_wif;
+	if_index = wiphy->tx_if;
 	skb = wiphy->tx_skb;
 
-	wiphy->tx_wif = NULL;
+	wiphy->tx_if = 0;
 	wiphy->tx_control = NULL;
 	wiphy->tx_skb = NULL;
 
-	BUG_ON(skb == NULL || wif == NULL);
-	int ret = virtio_wifi_do_tx(wiphy, wif->index, skb);
+	BUG_ON(skb == NULL);
+	int ret = virtio_wifi_do_tx(wiphy, if_index, skb);
 	if (ret) {
 		printk("%s do_tx returned %d\n", __func__, ret);
 		goto err;
 	}
-	ieee80211_tx_status_skb(wiphy->hw, skb);
+	/* TODO: ieee80211_tx_status_skb(wiphy->hw, skb); */
 
 	return;
 err:
-	ieee80211_free_txskb(wiphy->hw, skb);
+	/* TODO: ieee80211_free_txskb(wiphy->hw, skb); */
 	return;
 }
 
@@ -185,10 +185,10 @@ static void commandq_callback(struct virtqueue *queue)
 	unsigned int len;
 	struct virtio_wifi_msg *msg;
 
-	printk("%s called\n", __func__);
+	/* printk("%s called\n", __func__); */
 process_bufs:
 	while ((msg = virtqueue_get_buf(queue, &len))) {
-		printk("%s waking up msg\n", __func__);
+		/* printk("%s waking up msg\n", __func__); */
 		msg->resp_actual_size = len;
 
 		complete(&msg->responded);
@@ -212,7 +212,7 @@ static void eventq_callback(struct virtqueue *queue)
 {
 	struct virtio_wifi *vv = queue->vdev->priv;
 
-	printk("%s called\n", __func__);
+	/* printk("%s called\n", __func__); */
 	schedule_work(&vv->eventq_work);
 }
 
@@ -268,10 +268,10 @@ static void virtio_wifi_process_events(struct virtio_wifi *virtio_wifi)
 	unsigned long flags;
 	bool notify;
 
-	printk("%s called\n", __func__);
+	/* printk("%s called\n", __func__); */
 process_bufs:
 	while ((token = virtqueue_get_buf(eventq->vq, &len))) {
-		printk("%s got event buf %u bytes\n", __func__, len);
+		/* printk("%s got event buf %u bytes\n", __func__, len); */
 		if (len >= sizeof(struct virtio_wifi_event)) {
 			virtio_wifi_process_event_buf(virtio_wifi, token, len);
 		} else {
@@ -312,7 +312,7 @@ static void virtio_wifi_event_work(struct work_struct *work)
 	struct virtio_wifi *vv =
 		container_of(work, struct virtio_wifi, eventq_work);
 
-	printk("%s called\n", __func__);
+	/* printk("%s called\n", __func__); */
 	virtio_wifi_process_events(vv);
 }
 
@@ -327,10 +327,10 @@ static void tx_callback(struct virtqueue *queue)
 	unsigned int len;
 	struct virtio_wifi_msg *msg;
 
-	printk("%s called\n", __func__);
+	/* printk("%s called\n", __func__); */
 process_bufs:
 	while ((msg = virtqueue_get_buf(queue, &len))) {
-		printk("%s waking up msg\n", __func__);
+		/* printk("%s waking up msg\n", __func__); */
 		msg->resp_actual_size = len;
 
 		complete(&msg->responded);
@@ -353,7 +353,7 @@ static void virtio_wifi_process_rx_buf(struct virtio_wifi *virtio_wifi,
 	void *frame_data;
 	u32 index = virtio_le_to_cpu(hdr->index);
 
-	printk("%s for iface = %u\n", __func__, index);
+	/* printk("%s for iface = %u\n", __func__, index); */
 	struct virtio_wifi_wiphy *w, *n;
 
 	spin_lock_bh(&virtio_wifi->wiphys_lock);
@@ -373,7 +373,7 @@ static void virtio_wifi_process_rx_buf(struct virtio_wifi *virtio_wifi,
 		/* Copy the data */
 		skb_put_data(skb, frame_data, frame_data_len);
 		// step 2 ieee80211_rx_irqsafe(data->hw, skb); (is radiotap needed?)
-		ieee80211_rx_irqsafe(w->hw, skb);
+		/* TODO ieee80211_rx_irqsafe(w->hw, skb); */
 		break;
 	}
 	spin_unlock_bh(&virtio_wifi->wiphys_lock);
@@ -676,8 +676,6 @@ static void virtio_wifi_remove(struct virtio_device *virtio_dev)
 			&vv->wiphys, struct virtio_wifi_wiphy, node))) {
 		list_del(&wiphy->node);
 		spin_unlock_bh(&vv->wiphys_lock);
-		device_release_driver(wiphy->dev);
-		device_destroy(virtio_wifi_class, 0);
 		virtio_wifi_cfg80211_destroy_wiphy(wiphy->wiphy);
 		spin_lock_bh(&vv->wiphys_lock);
 	}
@@ -711,7 +709,6 @@ static struct virtio_driver virtio_wifi_driver = {
 module_virtio_driver(virtio_wifi_driver);
 
 MODULE_DEVICE_TABLE(virtio, id_table);
-MODULE_SOFTDEP("pre: mac80211");
 MODULE_DESCRIPTION("virtio wifi driver");
 MODULE_AUTHOR("Manos Pitsidianakis <manos.pitsidianakis@linaro.org>");
 MODULE_LICENSE("GPL");

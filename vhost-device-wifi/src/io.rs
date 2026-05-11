@@ -270,20 +270,20 @@ fn feed_rxq(buffer: Buffer, iface: u32, data: &[u8]) {
     buffer.vring.signal_used_queue().unwrap();
 }
 
-fn feed_eventq(buffer: Buffer, event: Vec<u8>) {
+fn feed_eventq(buffer: Buffer, event: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
     let mem = buffer.desc_chain.memory();
     let mut writer = buffer.desc_chain.clone().writer(mem).unwrap();
     use std::io::Write;
     let len = event.len();
-    writer.write_all(&event).unwrap();
+    writer.write_all(&event)?;
 
     let used_len = writer.bytes_written();
 
     buffer
         .vring
-        .add_used(buffer.desc_chain.head_index(), used_len as u32)
-        .unwrap();
-    buffer.vring.signal_used_queue().unwrap();
+        .add_used(buffer.desc_chain.head_index(), used_len as u32)?;
+    buffer.vring.signal_used_queue()?;
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -501,16 +501,20 @@ impl IoWorkerData {
                         break;
                     };
                     let ev = delayed_event_work.pop_front().unwrap();
-                    feed_eventq(buf, ev);
+                    if let Err(err) = feed_eventq(buf, ev) {
+                        log::error!("feed_eventq err: {err}");
+                    }
                 }
             } else if pollfds[new_event_idx].any().unwrap_or_default() {
                 event_notifier.event_fd.read().unwrap();
                 while let Ok(ev) = event_notifier.receiver.try_recv() {
                     let Some(buf) = self.event_buffers.lock().unwrap().pop() else {
                         delayed_event_work.push_back(ev);
-                        break;
+                        continue;
                     };
-                    feed_eventq(buf, ev);
+                    if let Err(err) = feed_eventq(buf, ev) {
+                        log::error!("feed_eventq err: {err}");
+                    }
                 }
             } else if pollfds[socket_change_event_idx].any().unwrap_or_default() {
                 // socket change buffer event
@@ -601,6 +605,21 @@ impl IoWorkerData {
 
                     assert_eq!(packet_data.tp_len as usize, read.bytes);
                     let read = read.bytes.min(packet_data.tp_len as usize);
+
+                    match ::libwifi::parse_frame(&iov[0..read], false) {
+                        Ok(frame) => {
+                            log::debug!("Got 802.11 RX frame: {frame:?}");
+                        }
+                        Err(_err) => {
+                            match etherparse::PacketHeaders::from_ethernet_slice(&iov[0..read]) {
+                                Err(err) => log::debug!("Error during parsing RX:\n{err:?}"),
+                                Ok(frame) => {
+                                    log::debug!("Got 802.3 RX frame: {frame:?}");
+                                }
+                            }
+                        }
+                    };
+
                     // CHATTY: log::debug!(
                     //     "read {read} bytes from socket {i} iface = {}",
                     //     dup_fd.iface_index

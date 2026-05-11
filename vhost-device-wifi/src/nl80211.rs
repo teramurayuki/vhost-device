@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     error::Error,
     sync::Arc, //
 };
@@ -18,12 +18,15 @@ use neli::{
 };
 
 use nix::sys::eventfd::EventFd;
-use vm_memory::ByteValued;
 
 use crate::virtio_wifi;
 
 mod bss;
 use bss::*;
+mod mcast;
+use mcast::*;
+mod wiphy;
+use wiphy::*;
 
 #[neli::neli_enum(serialized_type = "u8")]
 pub enum Nl80211Command {
@@ -42,6 +45,10 @@ pub enum Nl80211Command {
     SetChannel = 65,
     /// `NL80211_CMD_NEW_SCAN_RESULTS`
     NewScanResults = 34,
+    /// `NL80211_CMD_FRAME`
+    Frame = 59,
+    /// `NL80211_CMD_REGISTER_FRAME`
+    RegisterFrame = 58,
     /* Many many more elided */
 }
 impl neli::consts::genl::Cmd for Nl80211Command {}
@@ -1099,6 +1106,8 @@ pub struct Wiphy {
     pub software_iftypes: u32,
     pub interface_combinations: u32,
     pub ht_capability_mask: u32,
+    pub supported_tx_frames: BTreeSet<FrameType>,
+    pub supported_rx_frames: BTreeSet<FrameType>,
 }
 
 impl TryFrom<NlMessage> for Wiphy {
@@ -1224,6 +1233,7 @@ impl TryFrom<NlMessage> for Wiphy {
                 ht_ampdu_density,
             });
         }
+
         let feature_flags = extract!(FeatureFlags: u32);
         let supports_t_dls = extract!(TdlsSupport: bool);
         let retry_short = extract!(WiphyRetryShort: u8);
@@ -1288,6 +1298,8 @@ impl TryFrom<NlMessage> for Wiphy {
             software_iftypes,
             interface_combinations,
             ht_capability_mask,
+            supported_tx_frames: BTreeSet::default(),
+            supported_rx_frames: BTreeSet::default(),
         })
     }
 }
@@ -1317,9 +1329,25 @@ impl From<&Wiphy> for virtio_wifi::VirtioWifiRadio {
     }
 }
 
+impl Wiphy {
+    fn set_properties(&mut self, properties: Vec<WiphyProperty>) {
+        for prop in properties {
+            match prop {
+                WiphyProperty::TxFrameType(types) => {
+                    self.supported_tx_frames.extend(types);
+                }
+                WiphyProperty::RxFrameType(types) => {
+                    self.supported_rx_frames.extend(types);
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Interface {
     pub index: u32,
+    pub wdev: u64,
     pub name: String,
     pub addr: [u8; 6],
     pub iftype: Result<crate::virtio_wifi::IfType, u32>,
@@ -1392,11 +1420,20 @@ impl TryFrom<NlMessage> for Interface {
             .unwrap()
             .try_into()
             .unwrap();
+        let wdev = attr_handles
+            .extract_if(.., |attr| {
+                matches!(attr.nla_type().nla_type(), Nl80211Attribute::WDev)
+            })
+            .next()
+            .ok_or(())?
+            .get_payload_as::<u64>()
+            .unwrap();
         Ok(Self {
             name,
             index,
             iftype,
             addr,
+            wdev,
             response: Default::default(),
         })
     }
@@ -1527,7 +1564,7 @@ impl Nl80211Socket {
     pub fn new() -> Result<(Self, EventNotifier), Box<dyn Error>> {
         const FAMILY_ID: &str = "nl80211";
         // Initialize NlRouter and resolve 'nl80211' genl family
-        let (sock, mut multicast_receiver) = NlRouter::connect(
+        let (sock, multicast_receiver) = NlRouter::connect(
             NlFamily::Generic, /* family */
             Some(0),           /* pid */
             Groups::empty(),   /* groups */
@@ -1536,146 +1573,21 @@ impl Nl80211Socket {
         let family_id = sock.resolve_genl_family(FAMILY_ID)?;
         let config_group = sock.resolve_nl_mcast_group(FAMILY_ID, "config")?;
         let scan_group = sock.resolve_nl_mcast_group(FAMILY_ID, "scan")?;
-        let groups = Groups::new_groups(&[config_group, scan_group]);
+        let mlme_group = sock.resolve_nl_mcast_group(FAMILY_ID, "mlme")?;
+        let groups = Groups::new_groups(&[config_group, scan_group, mlme_group]);
         sock.add_mcast_membership(groups)?;
         let inner = sock.into();
         let (event_sender, receiver) = std::sync::mpsc::channel();
         let event_fd = Arc::new(EventFd::new().unwrap());
         std::thread::spawn({
-            let sock = Arc::clone(&inner);
-            let event_fd = Arc::clone(&event_fd);
-            let family_id = family_id;
-            move || {
-                while let Some(msg) = multicast_receiver.next_typed::<GenlId, Genlmsghdr<
-                    Nl80211Command,
-                    Nl80211Attribute,
-                    NoUserHeader,
-                >>() {
-                    // log::trace!("mcast {msg:?}");
-                    let Ok(msg) = msg else {
-                        break;
-                    };
-                    let NlPayload::Payload(payload) = msg.nl_payload() else {
-                        continue;
-                    };
-                    if matches!(payload.cmd(), Nl80211Command::NewScanResults) && *msg.nl_pid() == 0
-                    {
-                        let index = payload
-                            .attrs()
-                            .get_attr_handle()
-                            .iter()
-                            .find(|a| matches!(a.nla_type().nla_type(), Nl80211Attribute::IfIndex))
-                            .unwrap()
-                            .get_payload_as::<u32>()
-                            .unwrap();
-
-                        let attrs = vec![NlattrBuilder::default()
-                            .nla_type(
-                                AttrTypeBuilder::default()
-                                    .nla_type(Nl80211Attribute::IfIndex)
-                                    .build()
-                                    .unwrap(),
-                            )
-                            .nla_payload(index)
-                            .build()
-                            .unwrap()]
-                        .into_iter()
-                        .collect::<GenlBuffer<_, _>>();
-
-                        let recv = sock
-                            .send(
-                                family_id,
-                                NlmF::REQUEST
-                                    | NlmF::ACK
-                                    | NlmF::REPLACE
-                                    | NlmF::ROOT
-                                    | NlmF::MATCH,
-                                NlPayload::Payload(
-                                    GenlmsghdrBuilder::<
-                                        Nl80211Command,
-                                        Nl80211Attribute,
-                                        NoUserHeader,
-                                    >::default()
-                                    .cmd(Nl80211Command::GetScan)
-                                    .attrs(attrs)
-                                    .version(1)
-                                    .build()
-                                    .unwrap(),
-                                ),
-                            )
-                            .unwrap();
-                        let recv = recv
-                            .into_iter()
-                            .collect::<Result<Vec<NlMessage>, _>>()
-                            .unwrap();
-                        // for each ssid send eventq bssid inform
-                        let mut _if_index = None;
-                        for msg in recv {
-                            let NlPayload::Payload(payload) = msg.nl_payload() else {
-                                continue;
-                            };
-                            let attr_handle = payload.attrs().get_attr_handle();
-                            let mut attr_handles = attr_handle.iter().collect::<Vec<_>>();
-                            let if_index = attr_handles
-                                .extract_if(.., |attr| {
-                                    matches!(attr.nla_type().nla_type(), Nl80211Attribute::IfIndex)
-                                })
-                                .next()
-                                .and_then(|t| t.get_payload_as::<u32>().ok())
-                                .unwrap();
-                            _if_index = Some(if_index);
-                            let _wdev = attr_handles
-                                .extract_if(.., |attr| {
-                                    matches!(attr.nla_type().nla_type(), Nl80211Attribute::WDev)
-                                })
-                                .next()
-                                .and_then(|t| t.get_payload_as::<u32>().ok())
-                                .unwrap();
-                            let bss: BSS = attr_handle
-                                .get_nested_attributes::<Nl80211BSS>(Nl80211Attribute::Bss)
-                                .unwrap()
-                                .try_into()
-                                .unwrap();
-                            let mut result = virtio_wifi::VirtioWifiScanResult {
-                                hdr: virtio_wifi::VirtioWifiEvent {
-                                    code: (virtio_wifi::VirtioWifiEventCode::ScanResult as u32)
-                                        .into(),
-                                    if_index: if_index.into(),
-                                },
-                                ielen: u64::try_from(bss.information_elements.len())
-                                    .unwrap()
-                                    .into(),
-                                ..virtio_wifi::VirtioWifiScanResult::from(&bss)
-                            }
-                            .as_slice()
-                            .to_vec();
-                            result.extend(&bss.information_elements);
-                            while let Err(std::sync::mpsc::SendError(again)) =
-                                event_sender.send(result)
-                            {
-                                result = again;
-                                log::error!("Send error!");
-                            }
-                            event_fd.write(1).unwrap();
-                        }
-                        event_sender
-                            .send(
-                                virtio_wifi::VirtioWifiEvent {
-                                    code: (virtio_wifi::VirtioWifiEventCode::EndScan as u32).into(),
-                                    if_index: _if_index.unwrap().into(),
-                                }
-                                .as_slice()
-                                .to_vec(),
-                            )
-                            .unwrap();
-                        event_fd.write(1).unwrap();
-                    } else {
-                        // let attr_handle = payload.attrs().get_attr_handle();
-                        // let mut attr_handles = attr_handle.iter().collect::<Vec<_>>();
-                        //dbg!(&attr_handles);
-                    }
-                }
-            }
+            let mut mcast_listener = McastListener {
+                multicast_receiver,
+                sock: Arc::clone(&inner),
+                event_fd: Arc::clone(&event_fd),
+                family_id,
+                event_sender,
+            };
+            move || mcast_listener.listen().unwrap()
         });
         Ok((
             Self { inner, family_id },
@@ -1711,13 +1623,66 @@ impl Nl80211Socket {
             ),
         )?;
         let recv = recv.into_iter().collect::<Result<Vec<NlMessage>, _>>()?;
-        Ok(recv
+        let mut wiphys = recv
             .into_iter()
             .filter(|msg| !matches!(msg.nl_payload(), NlPayload::DumpExtAck(_)))
             .map(Wiphy::try_from)
             .map(|res| res.map(|w| (w.index, w)))
             .collect::<Result<BTreeMap<u32, Wiphy>, _>>()
-            .map_err(|()| "GetWiphy error")?)
+            .map_err(|()| "GetWiphy error")?;
+        for w in wiphys.values_mut() {
+            let properties = self.wiphy(w.index)?;
+            w.set_properties(properties);
+        }
+        log::debug!("wiphies = {:?}", &wiphys);
+        Ok(wiphys)
+    }
+
+    pub fn wiphy(&self, index: u32) -> Result<Vec<WiphyProperty>, Box<dyn Error>> {
+        // let index: libc::c_int = 1;
+        let attrs = vec![
+            NlattrBuilder::default()
+                .nla_type(
+                    AttrTypeBuilder::default()
+                        .nla_type(Nl80211Attribute::Wiphy)
+                        .build()
+                        .unwrap(),
+                )
+                .nla_payload(index)
+                .build()
+                .unwrap(),
+            NlattrBuilder::default()
+                .nla_type(
+                    AttrTypeBuilder::default()
+                        .nla_type(Nl80211Attribute::SplitWiphyDump)
+                        .build()
+                        .unwrap(),
+                )
+                .nla_payload(())
+                .build()
+                .unwrap(),
+        ]
+        .into_iter()
+        .collect::<GenlBuffer<_, _>>();
+        // Query system for WiFi radios using the 'GetWiphy' command
+        let recv = self.inner.send(
+            self.family_id,
+            NlmF::DUMP | NlmF::ACK,
+            NlPayload::Payload(
+                GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
+                    .cmd(Nl80211Command::GetWiPhy)
+                    .version(1)
+                    .attrs(attrs)
+                    .build()?,
+            ),
+        )?;
+        let recv = recv.into_iter().collect::<Result<Vec<NlMessage>, _>>()?;
+        let mut properties = vec![];
+        for r in &recv {
+            // dbg!(&parse_wiphy_properties(r));
+            properties.extend(parse_wiphy_properties(r));
+        }
+        Ok(properties)
     }
 
     pub fn list_ifaces(&self, wiphy: &Wiphy) -> Result<BTreeMap<u32, Interface>, Box<dyn Error>> {
@@ -1863,6 +1828,11 @@ impl Nl80211Socket {
         //     Err(other) => other.into(),
         // };
         log::info!("Created new vif on wiphy {index}: {new:?}");
+        log::info!("Registering frames...");
+        for ft in wiphy.supported_rx_frames.iter() {
+            dbg!(self.register_frame(new.wdev, new.index, *ft));
+        }
+        log::info!("Registering frames: done");
         Ok(new)
     }
 
@@ -2037,6 +2007,74 @@ impl Nl80211Socket {
             NlPayload::Payload(
                 GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
                     .cmd(Nl80211Command::TriggerScan)
+                    .attrs(attrs)
+                    .version(1)
+                    .build()?,
+            ),
+        )?;
+        let _recv = recv.into_iter().collect::<Result<Vec<NlMessage>, _>>()?;
+        // dbg!(&_recv);
+        Ok(())
+    }
+
+    pub fn register_frame(
+        &self,
+        wdev: u64,
+        iface_index: u32,
+        ft: FrameType,
+    ) -> Result<(), Box<dyn Error>> {
+        log::debug!("registering {ft:?}");
+        let attrs = vec![
+            NlattrBuilder::default()
+                .nla_type(
+                    AttrTypeBuilder::default()
+                        .nla_type(Nl80211Attribute::WDev)
+                        .build()
+                        .unwrap(),
+                )
+                .nla_payload(wdev)
+                .build()
+                .unwrap(),
+            NlattrBuilder::default()
+                .nla_type(
+                    AttrTypeBuilder::default()
+                        .nla_type(Nl80211Attribute::IfIndex)
+                        .build()
+                        .unwrap(),
+                )
+                .nla_payload(iface_index)
+                .build()
+                .unwrap(),
+            NlattrBuilder::default()
+                .nla_type(
+                    AttrTypeBuilder::default()
+                        .nla_type(Nl80211Attribute::FrameType)
+                        .build()
+                        .unwrap(),
+                )
+                .nla_payload(ft.as_u16())
+                .build()
+                .unwrap(),
+            NlattrBuilder::default()
+                .nla_type(
+                    AttrTypeBuilder::default()
+                        .nla_type(Nl80211Attribute::FrameMatch)
+                        .build()
+                        .unwrap(),
+                )
+                .nla_payload([1_u8])
+                .build()
+                .unwrap(),
+        ]
+        .into_iter()
+        .collect::<GenlBuffer<_, _>>();
+
+        let recv = self.inner.send(
+            self.family_id,
+            NlmF::ACK,
+            NlPayload::Payload(
+                GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
+                    .cmd(Nl80211Command::RegisterFrame)
                     .attrs(attrs)
                     .version(1)
                     .build()?,

@@ -10,8 +10,12 @@
 
 #include "virtio_wifi.h"
 
-static const struct net_device_ops virtio_wifi_cfg80211_ops;
+static struct rtnl_link_ops virtio_wifi_cfg80211_link_ops;
+static const struct net_device_ops virtio_wifi_netdev_ops;
 static struct virtio_wifi *common_virtio_wifi;
+static void virtio_wifi_cfg80211_connect_complete(struct work_struct *work);
+static void virtio_wifi_cfg80211_net_device_destructor(struct net_device *dev);
+static rx_handler_result_t virtio_wifi_cfg80211_rx_handler(struct sk_buff **pskb);
 
 struct virtio_wifi_vif {
 	struct list_head list;
@@ -172,11 +176,6 @@ static struct ieee80211_supported_band band_5ghz = {
 	},
 };
 
-/* Assigned at module init. Guaranteed locally-administered and unicast. */
-static u8 fake_router_bssid[ETH_ALEN] __ro_after_init = {};
-
-#define virtio_wifi_cfg80211_SSID "VirtWifi"
-#define virtio_wifi_cfg80211_SSID_LEN 8
 
 void virtio_wifi_cfg80211_inform_bss(struct wiphy *wiphy, struct virtio_wifi_scan_result *bss, void *ie, size_t ie_len)
 {
@@ -184,7 +183,7 @@ void virtio_wifi_cfg80211_inform_bss(struct wiphy *wiphy, struct virtio_wifi_sca
 	u32 signal = virtio_le_to_cpu(bss->signal);
 	struct cfg80211_bss *informed_bss;
 
-	printk("%s called\n", __func__);
+	/* printk("%s called\n", __func__); */
 	informed_bss = cfg80211_inform_bss(
 		wiphy, &channel_2ghz, CFG80211_BSS_FTYPE_PRESP,
 		bss->bssid, tsf, WLAN_CAPABILITY_ESS, 0, ie,
@@ -196,34 +195,12 @@ void virtio_wifi_cfg80211_scan_done(struct wiphy *wiphy)
 {
 	struct virtio_wifi_wiphy *priv = wiphy_priv(wiphy);
 	struct cfg80211_scan_info scan_info = { .aborted = false };
-	printk("%s called\n", __func__);
+	/* printk("%s called\n", __func__); */
 
 	if (!priv->scan_request || priv->being_deleted)
 		return;
 	cfg80211_scan_done(priv->scan_request, &scan_info);
 	priv->scan_request = NULL;
-}
-
-static void virtio_wifi_cfg80211_inform_bss2(struct wiphy *wiphy)
-{
-	u64 tsf = div_u64(ktime_get_boottime_ns(), 1000);
-	struct cfg80211_bss *informed_bss;
-	static const struct {
-		u8 tag;
-		u8 len;
-		u8 ssid[8] __nonstring;
-	} __packed ssid = {
-		.tag = WLAN_EID_SSID,
-		.len = virtio_wifi_cfg80211_SSID_LEN,
-		.ssid = virtio_wifi_cfg80211_SSID,
-	};
-
-	printk("%s called\n", __func__);
-	informed_bss = cfg80211_inform_bss(
-		wiphy, &channel_5ghz, CFG80211_BSS_FTYPE_PRESP,
-		fake_router_bssid, tsf, WLAN_CAPABILITY_ESS, 0, (void *)&ssid,
-		sizeof(ssid), DBM_TO_MBM(-50), GFP_KERNEL);
-	cfg80211_put_bss(wiphy, informed_bss);
 }
 
 /* Called with the rtnl lock held. */
@@ -234,7 +211,7 @@ static int virtio_wifi_cfg80211_scan(struct wiphy *wiphy,
 	struct wireless_dev *wdev = request->wdev;
 	struct virtio_wifi_vif *vif = container_of(wdev, struct virtio_wifi_vif, wdev);
 
-	printk("%s called\n", __func__);
+	/* printk("%s called\n", __func__); */
 	wiphy_debug(wiphy, "scan\n");
 
 	if (priv->scan_request || priv->being_deleted)
@@ -254,6 +231,7 @@ static struct wireless_dev *virtio_wifi_cfg80211_add_virtual_intf(
 	struct virtio_wifi *virtio_wifi = priv->virtio_wifi;;
 	struct virtio_wifi_vif *vif;
 	struct net_device *ndev;
+	struct wireless_dev *wdev;
 	int ret = 0;
 
 	u32 if_index = 0;
@@ -287,22 +265,41 @@ static struct wireless_dev *virtio_wifi_cfg80211_add_virtual_intf(
 	}
 
 	vif = netdev_priv(ndev);
-	vif->index = if_index;
-	ndev->ieee80211_ptr = &vif->wdev;
-	vif->wdev.wiphy = wiphy;
+	ret = netdev_rx_handler_register(ndev,
+					 virtio_wifi_cfg80211_rx_handler, vif);
+	if (ret) {
+		WARN_ON(ret);
+		kfree(ndev);
+		return ERR_PTR(ret);
+	}
+
+	vif->being_deleted = false;
+	vif->is_connected = false;
+	vif->is_up = false;
 	vif->virtio_wifi = virtio_wifi;
 	vif->ndev = ndev;
-	SET_NETDEV_DEV(ndev, wiphy_dev(vif->wdev.wiphy));
-	vif->wdev.netdev = ndev;
-	vif->wdev.iftype = type;
 
+	INIT_DELAYED_WORK(&vif->connect,
+			  virtio_wifi_cfg80211_connect_complete);
+	vif->index = if_index;
 
-	ndev->netdev_ops = &virtio_wifi_cfg80211_ops;
+	wdev = &vif->wdev;
+	wdev->wiphy = wiphy;
+	wdev->netdev = ndev;
+	wdev->iftype = type;
+	SET_NETDEV_DEV(ndev, wiphy_dev(wdev->wiphy));
+	ndev->ieee80211_ptr = wdev;
+
+	ndev->rtnl_link_ops = &virtio_wifi_cfg80211_link_ops;
+	ndev->netdev_ops = &virtio_wifi_netdev_ops;
 	ndev->needs_free_netdev = true;
+	ndev->priv_destructor = virtio_wifi_cfg80211_net_device_destructor;
+	ndev->needed_headroom = ETH_HLEN;
 	
 	if (cfg80211_register_netdevice(ndev)) {
 		WARN_ON(1);
 		kfree(ndev);
+		netdev_rx_handler_unregister(ndev);
 		return ERR_PTR(-ENOMEM);
 	}
 
@@ -333,7 +330,7 @@ void virtio_wifi_cfg80211_cancel_scan(struct wiphy *wiphy)
 {
 	struct virtio_wifi_wiphy *priv = wiphy_priv(wiphy);
 
-	printk("%s called\n", __func__);
+	/* printk("%s called\n", __func__); */
 	/* Clean up dangling callbacks if necessary. */
 	if (priv->scan_request) {
 		struct cfg80211_scan_info scan_info = { .aborted = true };
@@ -369,7 +366,7 @@ static int virtio_wifi_cfg80211_connect(struct wiphy *wiphy,
 	if (sme->bssid) {
 		ether_addr_copy(vif->connect_requested_bss, sme->bssid);
 	} else {
-		virtio_wifi_cfg80211_inform_bss2(wiphy);
+		/* virtio_wifi_cfg80211_inform_bss2(wiphy); */
 		eth_zero_addr(vif->connect_requested_bss);
 	}
 
@@ -384,26 +381,20 @@ static void virtio_wifi_cfg80211_connect_complete(struct work_struct *work)
 	struct virtio_wifi_vif *vif = container_of(
 		work, struct virtio_wifi_vif, connect.work);
 	u8 *requested_bss = vif->connect_requested_bss;
-	bool right_addr = ether_addr_equal(requested_bss, fake_router_bssid);
-	bool right_ssid = vif->connect_requested_ssid_len ==
-				  virtio_wifi_cfg80211_SSID_LEN &&
-			  !memcmp(vif->connect_requested_ssid,
-				  virtio_wifi_cfg80211_SSID,
-				  vif->connect_requested_ssid_len);
 	u16 status = WLAN_STATUS_SUCCESS;
 	printk("%s called\n", __func__);
 
 	if (is_zero_ether_addr(requested_bss))
 		requested_bss = NULL;
 
-	if (!vif->is_up || (requested_bss && !right_addr) || !right_ssid)
+	if (!vif->is_up)
 		status = WLAN_STATUS_UNSPECIFIED_FAILURE;
 	else
 		vif->is_connected = true;
 
 	/* Schedules an event that acquires the rtnl lock. */
 	cfg80211_connect_result(vif->ndev,
-				vif->is_connected ? fake_router_bssid : NULL,
+				/* vif->is_connected ? fake_router_bssid : */ NULL,
 				NULL, 0, NULL, 0, status, GFP_KERNEL);
 }
 
@@ -411,6 +402,9 @@ static void virtio_wifi_cfg80211_connect_complete(struct work_struct *work)
 static void virtio_wifi_cfg80211_cancel_connect(struct net_device *netdev)
 {
 	struct virtio_wifi_vif *vif = netdev_priv(netdev);
+
+	if (!vif->is_connected)
+		return;
 
 	/* If there is work pending, clean up dangling callbacks. */
 	if (cancel_delayed_work_sync(&vif->connect)) {
@@ -452,7 +446,7 @@ static int virtio_wifi_cfg80211_get_station(struct wiphy *wiphy,
 
 	wiphy_debug(wiphy, "get_station\n");
 
-	if (!vif->is_connected || !ether_addr_equal(mac, fake_router_bssid))
+	if (!vif->is_connected)
 		return -ENOENT;
 
 	sinfo->filled = BIT_ULL(NL80211_STA_INFO_TX_PACKETS) |
@@ -482,9 +476,12 @@ static int virtio_wifi_cfg80211_dump_station(struct wiphy *wiphy,
 	if (idx != 0 || !vif->is_connected)
 		return -ENOENT;
 
-	ether_addr_copy(mac, fake_router_bssid);
-	return virtio_wifi_cfg80211_get_station(wiphy, dev, fake_router_bssid,
-						sinfo);
+	/* ether_addr_copy(mac, fake_router_bssid); */
+
+	//TODO:
+	return -ENOENT;
+	/* return virtio_wifi_cfg80211_get_station(wiphy, dev, fake_router_bssid, */
+	/* 					sinfo); */
 }
 
 // struct cfg80211_ops
@@ -504,6 +501,14 @@ static const struct cfg80211_ops virtio_wifi_cfg80211_cfg80211_ops = {
 	/*                const u8 *mac_addr); */
 	/* int (*set_default_key)(struct wiphy *wiphy, struct net_device *netdev, int link_id, u8 key_index, */
 	/*                        bool unicast, bool multicast); */
+};
+
+static const u32 cipher_suites[] = {
+	WLAN_CIPHER_SUITE_WEP40,
+	WLAN_CIPHER_SUITE_WEP104,
+	WLAN_CIPHER_SUITE_TKIP,
+	WLAN_CIPHER_SUITE_CCMP,
+	WLAN_CIPHER_SUITE_SMS4,
 };
 
 /* Acquires and releases the rtnl lock. */
@@ -630,6 +635,9 @@ virtio_wifi_cfg80211_make_wiphy(struct virtio_wifi *virtio_wifi,
 	wiphy->available_antennas_rx =
 		virtio_le_to_cpu(radio->available_antennas_rx);
 
+	wiphy->cipher_suites = cipher_suites;
+	wiphy->n_cipher_suites = ARRAY_SIZE(cipher_suites);
+
 	priv->flags = virtio_le_to_cpu(radio->flags);
 	priv->hwname_len = virtio_le_to_cpu(radio->hwname_len);
 	strscpy(priv->hwname, radio->hwname, sizeof(radio->hwname));
@@ -652,6 +660,7 @@ void virtio_wifi_cfg80211_destroy_wiphy(struct wiphy *wiphy)
 {
 	struct virtio_wifi_wiphy *priv;
 
+	printk("%s called %p\n", __func__, wiphy);
 	WARN(!wiphy, "%s called with null wiphy", __func__);
 	if (!wiphy)
 		return;
@@ -670,15 +679,27 @@ static netdev_tx_t virtio_wifi_cfg80211_start_xmit(struct sk_buff *skb,
 						   struct net_device *dev)
 {
 	struct virtio_wifi_vif *vif = netdev_priv(dev);
+	struct virtio_wifi_wiphy *priv = wiphy_priv(vif->wdev.wiphy);
+	struct ieee80211_tx_info *txi = IEEE80211_SKB_CB(skb);
 
+	printk("%s called\n", __func__);
 	vif->tx_packets++;
-	if (!vif->is_connected) {
-		vif->tx_failed++;
-		return NET_XMIT_DROP;
-	}
-
+	/* if (!vif->is_connected) { */
+	/* 	vif->tx_failed++; */
+	/* 	return NET_XMIT_DROP; */
+	/* } */
+	priv->tx_if = vif->index;
+	priv->tx_skb = skb;
 	skb->dev = vif->ndev;
-	return dev_queue_xmit(skb);
+
+	schedule_delayed_work(&priv->tx_work, 0);
+	ieee80211_tx_info_clear_status(txi);
+
+	/* frame was transmitted at most favorable rate at first attempt */
+	txi->control.rates[0].count = 1;
+	txi->control.rates[1].idx = -1;
+
+	return NETDEV_TX_OK;
 }
 
 /* Called with rtnl lock held. */
@@ -686,6 +707,7 @@ static int virtio_wifi_cfg80211_net_device_open(struct net_device *dev)
 {
 	struct virtio_wifi_vif *vif = netdev_priv(dev);
 
+	printk("%s called\n", __func__);
 	vif->is_up = true;
 	return 0;
 }
@@ -695,6 +717,7 @@ static int virtio_wifi_cfg80211_net_device_stop(struct net_device *dev)
 {
 	struct virtio_wifi_vif *vif = netdev_priv(dev);
 
+	printk("%s called\n", __func__);
 	vif->is_up = false;
 
 	if (!dev->ieee80211_ptr)
@@ -715,7 +738,7 @@ static int virtio_wifi_cfg80211_net_device_stop(struct net_device *dev)
 /* 	return READ_ONCE(priv->lowerdev->ifindex); */
 /* } */
 
-static const struct net_device_ops virtio_wifi_cfg80211_ops = {
+static const struct net_device_ops virtio_wifi_netdev_ops = {
 	.ndo_start_xmit = virtio_wifi_cfg80211_start_xmit,
 	.ndo_open = virtio_wifi_cfg80211_net_device_open,
 	.ndo_stop = virtio_wifi_cfg80211_net_device_stop,
@@ -730,14 +753,16 @@ static void virtio_wifi_cfg80211_net_device_destructor(struct net_device *dev)
 	 */
 	kfree(dev->ieee80211_ptr);
 	dev->ieee80211_ptr = NULL;
+	printk("%s called\n", __func__);
 }
 
 /* No lock interaction. */
 static void virtio_wifi_cfg80211_setup(struct net_device *dev)
 {
 	ether_setup(dev);
-	dev->netdev_ops = &virtio_wifi_cfg80211_ops;
+	dev->netdev_ops = &virtio_wifi_netdev_ops;
 	dev->needs_free_netdev = true;
+	printk("%s called\n", __func__);
 }
 
 /* Called in a RCU read critical section from netif_receive_skb */
@@ -748,6 +773,7 @@ virtio_wifi_cfg80211_rx_handler(struct sk_buff **pskb)
 	struct virtio_wifi_vif *vif =
 		rcu_dereference(skb->dev->rx_handler_data);
 
+	printk("%s called\n", __func__);
 	if (!vif->is_connected)
 		return RX_HANDLER_PASS;
 
@@ -764,35 +790,17 @@ virtio_wifi_cfg80211_rx_handler(struct sk_buff **pskb)
 	return RX_HANDLER_ANOTHER;
 }
 
-/* Called with rtnl lock held. */
-static int virtio_wifi_cfg80211_newlink(
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 13, 0)
-	struct net *src_net,
-#endif
-
-	struct net_device *dev,
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
-	struct rtnl_newlink_params *params,
-#else
-	struct nlattr *tb[], struct nlattr *data[],
-#endif
-	struct netlink_ext_ack *extack)
-{
-	struct virtio_wifi_vif *vif = netdev_priv(dev);
-	struct virtio_wifi_wiphy *virtio_wifi_wiphy;
-	struct list_head *node;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 13, 0)
-	struct net *link_net = rtnl_newlink_link_net(params);
-	struct nlattr **tb = params->tb;
-#endif
+static int register_ndev(struct net_device *dev) {
 	int err;
-
-	printk("%s called\n", __func__);
-	if (!tb[IFLA_LINK])
-		return -EINVAL;
+	struct list_head *node;
+	struct virtio_wifi_wiphy *virtio_wifi_wiphy;
+	struct virtio_wifi_vif *vif = netdev_priv(dev);
 
 	netif_carrier_off(dev);
 
+	dev_err(&vif->virtio_wifi->virtio_dev->dev,
+			"can't netdev_rx_handler_register: %d\n", -ENODEV);
+	return -ENODEV;
 	/* if (!tb[IFLA_MTU]) */
 	/* 	dev->mtu = priv->lowerdev->mtu; */
 	/* else if (dev->mtu > priv->lowerdev->mtu) */
@@ -835,6 +843,8 @@ static int virtio_wifi_cfg80211_newlink(
 		goto free_wireless_dev;
 	}
 
+	dev->rtnl_link_ops = &virtio_wifi_cfg80211_link_ops;
+
 	/* err = netdev_upper_dev_link(dev, dev, extack); */
 	/* if (err) { */
 	/* 	printk( */
@@ -858,37 +868,13 @@ free_wireless_dev:
 	dev->ieee80211_ptr = NULL;
 remove_handler:
 	netdev_rx_handler_unregister(dev);
-
 	return err;
 }
 
-/* Called with rtnl lock held. */
-static void virtio_wifi_cfg80211_dellink(struct net_device *dev,
-					 struct list_head *head)
-{
-	struct virtio_wifi_vif *vif = netdev_priv(dev);
-
-	if (dev->ieee80211_ptr)
-		virtio_wifi_cfg80211_cancel_scan(dev->ieee80211_ptr->wiphy);
-
-	vif->being_deleted = true;
-	virtio_wifi_cfg80211_cancel_connect(dev);
-	netif_carrier_off(dev);
-
-	netdev_rx_handler_unregister(dev);
-	/* netdev_upper_dev_unlink(priv->lowerdev, dev); */
-
-	unregister_netdevice_queue(dev, head);
-	module_put(THIS_MODULE);
-
-	/* Deleting the wiphy is handled in the module destructor. */
-}
 
 static struct rtnl_link_ops virtio_wifi_cfg80211_link_ops = {
 	.kind = "virtio_wifi",
 	.setup = virtio_wifi_cfg80211_setup,
-	.newlink = virtio_wifi_cfg80211_newlink,
-	.dellink = virtio_wifi_cfg80211_dellink,
 	.priv_size = sizeof(struct virtio_wifi_vif),
 };
 
@@ -932,8 +918,6 @@ int virtio_wifi_cfg80211_init_module(struct virtio_wifi *virtio_wifi)
 {
 	int err;
 
-	eth_random_addr(fake_router_bssid);
-
 	err = register_netdevice_notifier(&virtio_wifi_cfg80211_notifier);
 	if (err)
 		return err;
@@ -959,3 +943,5 @@ void virtio_wifi_cfg80211_cleanup_module(void)
 	rtnl_link_unregister(&virtio_wifi_cfg80211_link_ops);
 	unregister_netdevice_notifier(&virtio_wifi_cfg80211_notifier);
 }
+
+MODULE_ALIAS_RTNL_LINK("virtio_wifi");

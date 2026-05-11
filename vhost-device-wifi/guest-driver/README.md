@@ -33,3 +33,13 @@ trace-cmd report | less
 
 Capture: `airodump-ng -w captures/CAP moni0`
 Decode: `python3 read_pcap.py captures/CAP-04.cap`
+
+```
+$ wpa_supplicant -Dnl80211 -iwlan0 -c wpa_supplicant.conf &
+
+$ wpa_cli
+> add_network 0
+> set_network 0 ssid "HONEYPOT"
+> set_network 0 psk "password"
+> enable_network 0
+```
