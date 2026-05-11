@@ -37,7 +37,7 @@ pub struct WifiConfiguration {
 pub fn start_backend(
     listener: &mut Listener,
     config: WifiConfiguration,
-    (socket, event_notifier): (nl80211::Nl80211Socket, crate::nl80211::EventNotifier),
+    (socket, notifier): (nl80211::Nl80211Socket, crate::nl80211::Notifier),
 ) -> Result<()> {
     let WifiConfiguration { phy } = config;
 
@@ -45,10 +45,7 @@ pub fn start_backend(
     // threads, and so the code uses unwrap() instead. The panic on a thread
     // won't cause trouble to the main() function and should be safe for the
     // daemon.
-    let backend = Arc::new(RwLock::new(VhostUserWifiBackend::new(
-        socket,
-        event_notifier,
-    )?));
+    let backend = Arc::new(RwLock::new(VhostUserWifiBackend::new(socket, notifier)?));
 
     let mut daemon = VhostUserDaemon::new(
         String::from("vhost-device-wifi-backend"),

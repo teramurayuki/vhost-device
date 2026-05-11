@@ -1555,13 +1555,15 @@ pub struct Nl80211Socket {
     family_id: u16,
 }
 
-pub struct EventNotifier {
-    pub receiver: std::sync::mpsc::Receiver<Vec<u8>>,
+pub struct Notifier {
+    pub event_receiver: std::sync::mpsc::Receiver<Vec<u8>>,
     pub event_fd: Arc<EventFd>,
+    pub rx_event_fd: Arc<EventFd>,
+    pub rx_receiver: std::sync::mpsc::Receiver<(u32, Vec<u8>)>,
 }
 
 impl Nl80211Socket {
-    pub fn new() -> Result<(Self, EventNotifier), Box<dyn Error>> {
+    pub fn new() -> Result<(Self, Notifier), Box<dyn Error>> {
         const FAMILY_ID: &str = "nl80211";
         // Initialize NlRouter and resolve 'nl80211' genl family
         let (sock, multicast_receiver) = NlRouter::connect(
@@ -1577,21 +1579,30 @@ impl Nl80211Socket {
         let groups = Groups::new_groups(&[config_group, scan_group, mlme_group]);
         sock.add_mcast_membership(groups)?;
         let inner = sock.into();
-        let (event_sender, receiver) = std::sync::mpsc::channel();
+        let (event_sender, event_receiver) = std::sync::mpsc::channel();
+        let (rx_sender, rx_receiver) = std::sync::mpsc::channel();
         let event_fd = Arc::new(EventFd::new().unwrap());
+        let rx_event_fd = Arc::new(EventFd::new().unwrap());
         std::thread::spawn({
             let mut mcast_listener = McastListener {
                 multicast_receiver,
                 sock: Arc::clone(&inner),
                 event_fd: Arc::clone(&event_fd),
+                rx_event_fd: Arc::clone(&rx_event_fd),
                 family_id,
                 event_sender,
+                rx_sender,
             };
             move || mcast_listener.listen().unwrap()
         });
         Ok((
             Self { inner, family_id },
-            EventNotifier { receiver, event_fd },
+            Notifier {
+                event_receiver,
+                event_fd,
+                rx_receiver,
+                rx_event_fd,
+            },
         ))
     }
 
@@ -2075,6 +2086,49 @@ impl Nl80211Socket {
             NlPayload::Payload(
                 GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
                     .cmd(Nl80211Command::RegisterFrame)
+                    .attrs(attrs)
+                    .version(1)
+                    .build()?,
+            ),
+        )?;
+        let _recv = recv.into_iter().collect::<Result<Vec<NlMessage>, _>>()?;
+        // dbg!(&_recv);
+        Ok(())
+    }
+
+    pub fn send_frame(&self, iface_index: u32, frame: &[u8]) -> Result<(), Box<dyn Error>> {
+        log::debug!("sending frame to {iface_index:?}");
+        let attrs = vec![
+            NlattrBuilder::default()
+                .nla_type(
+                    AttrTypeBuilder::default()
+                        .nla_type(Nl80211Attribute::Frame)
+                        .build()
+                        .unwrap(),
+                )
+                .nla_payload(frame)
+                .build()
+                .unwrap(),
+            NlattrBuilder::default()
+                .nla_type(
+                    AttrTypeBuilder::default()
+                        .nla_type(Nl80211Attribute::IfIndex)
+                        .build()
+                        .unwrap(),
+                )
+                .nla_payload(iface_index)
+                .build()
+                .unwrap(),
+        ]
+        .into_iter()
+        .collect::<GenlBuffer<_, _>>();
+
+        let recv = self.inner.send(
+            self.family_id,
+            NlmF::ACK,
+            NlPayload::Payload(
+                GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
+                    .cmd(Nl80211Command::Frame)
                     .attrs(attrs)
                     .version(1)
                     .build()?,

@@ -261,6 +261,8 @@ fn feed_rxq(buffer: Buffer, iface: u32, data: &[u8]) {
     use std::io::Write;
     writer.write_all(data).unwrap();
 
+    log::debug!("writing RX to {iface} {} bytes", data.len());
+
     let used_len = writer.bytes_written();
 
     buffer
@@ -414,7 +416,7 @@ impl IoWorkerData {
     pub fn work(
         self,
         status_receiver: std::sync::mpsc::Receiver<StatusCommand>,
-        event_notifier: crate::nl80211::EventNotifier,
+        event_notifier: crate::nl80211::Notifier,
     ) {
         use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 
@@ -450,6 +452,14 @@ impl IoWorkerData {
             // CHATTY: log::debug!("work new loop got {} socket_fds", socket_fds.len());
             let mut pollfds = vec![];
             macro_rules! push_event_fd {
+                (rx_notifier) => {{
+                    let idx = pollfds.len();
+                    pollfds.push(PollFd::new(
+                        event_notifier.rx_event_fd.as_fd(),
+                        PollFlags::POLLIN,
+                    ));
+                    idx
+                }};
                 (event_notifier) => {{
                     let idx = pollfds.len();
                     pollfds.push(PollFd::new(
@@ -467,6 +477,7 @@ impl IoWorkerData {
             let new_rx_buffer_event_idx = push_event_fd!(new_rx_buffer_event);
             let new_event_buffer_event_idx = push_event_fd!(new_event_buffer_event);
             let new_event_idx = push_event_fd!(event_notifier);
+            let new_rx_idx = push_event_fd!(rx_notifier);
             let socket_change_event_idx = push_event_fd!(socket_change_event);
             let status_event_idx = push_event_fd!(status_event);
 
@@ -507,7 +518,7 @@ impl IoWorkerData {
                 }
             } else if pollfds[new_event_idx].any().unwrap_or_default() {
                 event_notifier.event_fd.read().unwrap();
-                while let Ok(ev) = event_notifier.receiver.try_recv() {
+                while let Ok(ev) = event_notifier.event_receiver.try_recv() {
                     let Some(buf) = self.event_buffers.lock().unwrap().pop() else {
                         delayed_event_work.push_back(ev);
                         continue;
@@ -515,6 +526,15 @@ impl IoWorkerData {
                     if let Err(err) = feed_eventq(buf, ev) {
                         log::error!("feed_eventq err: {err}");
                     }
+                }
+            } else if pollfds[new_rx_idx].any().unwrap_or_default() {
+                event_notifier.rx_event_fd.read().unwrap();
+                while let Ok((if_index, frame)) = event_notifier.rx_receiver.try_recv() {
+                    let Some(buf) = self.rx_buffers.lock().unwrap().pop() else {
+                        delayed_rx_work.push_back((if_index, frame));
+                        continue;
+                    };
+                    feed_rxq(buf, if_index, &frame);
                 }
             } else if pollfds[socket_change_event_idx].any().unwrap_or_default() {
                 // socket change buffer event

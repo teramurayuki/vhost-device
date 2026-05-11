@@ -79,7 +79,7 @@ impl Drop for VhostUserWifiBackend {
 impl VhostUserWifiBackend {
     pub fn new(
         socket: Nl80211Socket,
-        io_data_event_notifier: crate::nl80211::EventNotifier,
+        io_data_event_notifier: crate::nl80211::Notifier,
     ) -> Result<Self> {
         let wiphys = socket.list_wiphys().unwrap();
         let virtio_cfg = VirtioWifiConfig {
@@ -720,6 +720,7 @@ impl VhostUserWifiBackend {
             let mut used_len = 0;
 
             let request_kind: u32 = request.code.into();
+            let if_index: u32 = request.index.into();
             // FIXME: check if request_kind is TX?
             let available_bytes = reader.available_bytes();
             let mut buffer = vec![0; available_bytes];
@@ -731,38 +732,24 @@ impl VhostUserWifiBackend {
             match ::libwifi::parse_frame(&buffer, false) {
                 Ok(frame) => {
                     log::debug!("Got 802.11 TX frame: {frame:?}");
-                }
-                Err(_err) => match etherparse::PacketHeaders::from_ethernet_slice(&buffer) {
-                    Err(err) => log::debug!("Error during parsing TX:\n{err:?}"),
-                    Ok(frame) => {
-                        log::debug!("Got TX 802.3 frame: {frame:?}");
-                    }
-                },
-            };
-
-            match self
-                .io_data
-                .ifsockets
-                .lock()
-                .unwrap()
-                .get(&request.index.into())
-            {
-                Some(ifsocket) => {
-                    let code = if let Err(err) = ifsocket.write_all(&buffer) {
-                        log::debug!("txq error: {err}");
-                        virtio_wifi::VIRTIO_WIFI_S_IO_ERR.into()
-                    } else {
-                        log::debug!("txq wrote: {} bytes", buffer.len());
-                        let data_seqno = self.data_seqno;
-                        std::thread::spawn(move || {
-                            std::fs::write(
-                                std::path::Path::new("./data/tx").join(data_seqno.to_string()),
-                                &buffer,
-                            )
-                            .unwrap();
-                        });
-                        self.data_seqno += 1;
-                        virtio_wifi::VIRTIO_WIFI_S_OK.into()
+                    let code = match self.socket.send_frame(if_index, &buffer) {
+                        Ok(()) => {
+                            log::debug!("txq wrote: {} bytes", buffer.len());
+                            let data_seqno = self.data_seqno;
+                            std::thread::spawn(move || {
+                                std::fs::write(
+                                    std::path::Path::new("./data/tx").join(data_seqno.to_string()),
+                                    &buffer,
+                                )
+                                .unwrap();
+                            });
+                            self.data_seqno += 1;
+                            virtio_wifi::VIRTIO_WIFI_S_OK.into()
+                        }
+                        Err(err) => {
+                            log::error!("Could not TX frame: {err}");
+                            virtio_wifi::VIRTIO_WIFI_S_IO_ERR.into()
+                        }
                     };
                     writer
                         .write_obj(VirtioWifiHdr {
@@ -771,15 +758,54 @@ impl VhostUserWifiBackend {
                         })
                         .map_err(|_| Error::DescriptorWriteFailed)?;
                 }
-                None => {
-                    writer
-                        .write_obj(VirtioWifiHdr {
-                            code: virtio_wifi::VIRTIO_WIFI_S_BAD_MSG.into(),
-                            index: request.index,
-                        })
-                        .map_err(|_| Error::DescriptorWriteFailed)?;
-                }
-            }
+                Err(_err) => match etherparse::PacketHeaders::from_ethernet_slice(&buffer) {
+                    Err(err) => log::debug!("Error during parsing TX:\n{err:?}"),
+                    Ok(frame) => {
+                        log::debug!("Got TX 802.3 frame: {frame:?}");
+                        match self
+                            .io_data
+                            .ifsockets
+                            .lock()
+                            .unwrap()
+                            .get(&request.index.into())
+                        {
+                            Some(ifsocket) => {
+                                let code = if let Err(err) = ifsocket.write_all(&buffer) {
+                                    log::debug!("txq error: {err}");
+                                    virtio_wifi::VIRTIO_WIFI_S_IO_ERR.into()
+                                } else {
+                                    log::debug!("txq wrote: {} bytes", buffer.len());
+                                    let data_seqno = self.data_seqno;
+                                    std::thread::spawn(move || {
+                                        std::fs::write(
+                                            std::path::Path::new("./data/tx")
+                                                .join(data_seqno.to_string()),
+                                            &buffer,
+                                        )
+                                        .unwrap();
+                                    });
+                                    self.data_seqno += 1;
+                                    virtio_wifi::VIRTIO_WIFI_S_OK.into()
+                                };
+                                writer
+                                    .write_obj(VirtioWifiHdr {
+                                        code,
+                                        index: request.index,
+                                    })
+                                    .map_err(|_| Error::DescriptorWriteFailed)?;
+                            }
+                            None => {
+                                writer
+                                    .write_obj(VirtioWifiHdr {
+                                        code: virtio_wifi::VIRTIO_WIFI_S_BAD_MSG.into(),
+                                        index: request.index,
+                                    })
+                                    .map_err(|_| Error::DescriptorWriteFailed)?;
+                            }
+                        }
+                    }
+                },
+            };
 
             used_len += writer.bytes_written();
             assert!(used_len > 0);

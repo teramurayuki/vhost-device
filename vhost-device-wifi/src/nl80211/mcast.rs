@@ -26,7 +26,9 @@ pub struct McastListener {
     pub multicast_receiver: NlRouterReceiverHandle<u16, Genlmsghdr<u8, u16, NoUserHeader>>,
     pub sock: Arc<NlRouter>,
     pub event_fd: Arc<EventFd>,
+    pub rx_event_fd: Arc<EventFd>,
     pub event_sender: std::sync::mpsc::Sender<Vec<u8>>,
+    pub rx_sender: std::sync::mpsc::Sender<(u32, Vec<u8>)>,
     pub family_id: u16,
 }
 
@@ -57,8 +59,12 @@ impl McastListener {
             } else if matches!(payload.cmd(), Nl80211Command::Frame) && *msg.nl_pid() == 0 {
                 log::debug!("MLME FRAME RX");
                 let attr_handle = payload.attrs().get_attr_handle();
+                let frame =
+                    attr_handle.get_attr_payload_as_with_len::<Vec<u8>>(Nl80211Attribute::Frame)?;
+                let if_index = attr_handle.get_attr_payload_as::<u32>(Nl80211Attribute::IfIndex)?;
                 let mut attr_handles = attr_handle.iter().collect::<Vec<_>>();
                 dbg!(&attr_handles);
+                self.send_rx((if_index, frame));
             } else if matches!(payload.cmd(), Nl80211Command::NewInterface) && *msg.nl_pid() == 0 {
                 // Ignore
                 // TODO: send guest NEW_IF event?
@@ -76,7 +82,23 @@ impl McastListener {
         Ok(())
     }
 
-    pub fn get_scan(&mut self, index: u32) -> Result<(), Box<dyn std::error::Error>> {
+    fn send_rx(&self, mut frame: (u32, Vec<u8>)) {
+        while let Err(std::sync::mpsc::SendError(again)) = self.rx_sender.send(frame) {
+            frame = again;
+            log::error!("Send error!");
+        }
+        self.rx_event_fd.write(1).unwrap();
+    }
+
+    fn send_scan(&self, mut result: Vec<u8>) {
+        while let Err(std::sync::mpsc::SendError(again)) = self.event_sender.send(result) {
+            result = again;
+            log::error!("Send error!");
+        }
+        self.event_fd.write(1).unwrap();
+    }
+
+    fn get_scan(&mut self, index: u32) -> Result<(), Box<dyn std::error::Error>> {
         let attrs = vec![NlattrBuilder::default()
             .nla_type(
                 AttrTypeBuilder::default()
@@ -150,23 +172,16 @@ impl McastListener {
             .as_slice()
             .to_vec();
             result.extend(&bss.information_elements);
-            while let Err(std::sync::mpsc::SendError(again)) = self.event_sender.send(result) {
-                result = again;
-                log::error!("Send error!");
-            }
-            self.event_fd.write(1).unwrap();
+            self.send_scan(result);
         }
-        self.event_sender
-            .send(
-                virtio_wifi::VirtioWifiEvent {
-                    code: (virtio_wifi::VirtioWifiEventCode::EndScan as u32).into(),
-                    if_index: _if_index.unwrap().into(),
-                }
-                .as_slice()
-                .to_vec(),
-            )
-            .unwrap();
-        self.event_fd.write(1).unwrap();
+        self.send_scan(
+            virtio_wifi::VirtioWifiEvent {
+                code: (virtio_wifi::VirtioWifiEventCode::EndScan as u32).into(),
+                if_index: _if_index.unwrap().into(),
+            }
+            .as_slice()
+            .to_vec(),
+        );
         Ok(())
     }
 }
