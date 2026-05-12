@@ -3,6 +3,7 @@
 // Author: Manos Pitsidianakis <manos.pitsidianakis@linaro.org>
 
 pub mod backend;
+pub mod bindings;
 pub mod io;
 pub mod nl80211;
 pub mod types;

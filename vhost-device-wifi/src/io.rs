@@ -2,6 +2,7 @@
 // Copyright 2026 Panasonic Automotive Systems Co., Ltd.
 // Author: Manos Pitsidianakis <manos.pitsidianakis@linaro.org>
 
+use std::io::Write;
 use std::{
     collections::{BTreeMap, VecDeque},
     os::fd::{OwnedFd, *},
@@ -258,7 +259,6 @@ fn feed_rxq(buffer: Buffer, iface: u32, data: &[u8]) {
             index: iface.into(),
         })
         .unwrap();
-    use std::io::Write;
     writer.write_all(data).unwrap();
 
     log::debug!("writing RX to {iface} {} bytes", data.len());
@@ -275,8 +275,7 @@ fn feed_rxq(buffer: Buffer, iface: u32, data: &[u8]) {
 fn feed_eventq(buffer: Buffer, event: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
     let mem = buffer.desc_chain.memory();
     let mut writer = buffer.desc_chain.clone().writer(mem).unwrap();
-    use std::io::Write;
-    let len = event.len();
+    let _len = event.len();
     writer.write_all(&event)?;
 
     let used_len = writer.bytes_written();
@@ -307,11 +306,7 @@ impl Default for IoWorkerData {
 
 #[repr(u64)]
 pub enum StatusCommand {
-    // Must start at non-zero, because eventfd is a counter and needs a non-zero value to be
-    // added.
-    Start = 1,
-    Stop = 2,
-    Exit = 3,
+    Exit,
 }
 
 impl IoWorkerData {
@@ -354,7 +349,7 @@ impl IoWorkerData {
 
     #[inline]
     pub fn signal_add_rx_buffer(&self) {
-        self.new_rx_buffer_event.write(42).unwrap();
+        self.new_rx_buffer_event.write(1).unwrap();
     }
 
     #[inline]
@@ -378,20 +373,8 @@ impl IoWorkerData {
             });
         }
 
-        self.new_event_buffer_event.write(42).unwrap();
+        self.new_event_buffer_event.write(1).unwrap();
         // CHATTY: log::debug!("Received {} rxq buffer(s)", i);
-    }
-
-    #[inline]
-    pub fn start(&self, sender: &std::sync::mpsc::Sender<StatusCommand>) {
-        sender.send(StatusCommand::Start).unwrap();
-        self.status_event.write(1).unwrap();
-    }
-
-    #[inline]
-    pub fn stop(&self, sender: &std::sync::mpsc::Sender<StatusCommand>) {
-        sender.send(StatusCommand::Stop).unwrap();
-        self.status_event.write(1).unwrap();
     }
 
     #[inline]
@@ -404,19 +387,19 @@ impl IoWorkerData {
     #[inline]
     pub fn add_ifsocket(&self, index: u32, val: IfSocket) {
         self.ifsockets.lock().unwrap().insert(index, val);
-        self.socket_change_event.write(42).unwrap();
+        self.socket_change_event.write(1).unwrap();
     }
 
     #[inline]
     pub fn del_ifsocket(&self, index: u32) {
         self.ifsockets.lock().unwrap().remove(&index);
-        self.socket_change_event.write(42).unwrap();
+        self.socket_change_event.write(1).unwrap();
     }
 
     pub fn work(
         self,
         status_receiver: std::sync::mpsc::Receiver<StatusCommand>,
-        event_notifier: crate::nl80211::Notifier,
+        notifier: crate::nl80211::Notifier,
     ) {
         use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 
@@ -446,26 +429,13 @@ impl IoWorkerData {
         let mut delayed_rx_work = VecDeque::<(u32, Vec<u8>)>::new();
         let mut delayed_event_work = VecDeque::<Vec<u8>>::new();
 
-        let mut started = false;
-
         loop {
             // CHATTY: log::debug!("work new loop got {} socket_fds", socket_fds.len());
             let mut pollfds = vec![];
             macro_rules! push_event_fd {
-                (rx_notifier) => {{
+                (notifier.$f:ident) => {{
                     let idx = pollfds.len();
-                    pollfds.push(PollFd::new(
-                        event_notifier.rx_event_fd.as_fd(),
-                        PollFlags::POLLIN,
-                    ));
-                    idx
-                }};
-                (event_notifier) => {{
-                    let idx = pollfds.len();
-                    pollfds.push(PollFd::new(
-                        event_notifier.event_fd.as_fd(),
-                        PollFlags::POLLIN,
-                    ));
+                    pollfds.push(PollFd::new(notifier.$f.as_fd(), PollFlags::POLLIN));
                     idx
                 }};
                 ($f:ident) => {{
@@ -476,8 +446,8 @@ impl IoWorkerData {
             }
             let new_rx_buffer_event_idx = push_event_fd!(new_rx_buffer_event);
             let new_event_buffer_event_idx = push_event_fd!(new_event_buffer_event);
-            let new_event_idx = push_event_fd!(event_notifier);
-            let new_rx_idx = push_event_fd!(rx_notifier);
+            let new_event_idx = push_event_fd!(notifier.event_fd);
+            let new_rx_idx = push_event_fd!(notifier.rx_event_fd);
             let socket_change_event_idx = push_event_fd!(socket_change_event);
             let status_event_idx = push_event_fd!(status_event);
 
@@ -495,9 +465,9 @@ impl IoWorkerData {
                 self.new_rx_buffer_event.read().unwrap();
                 // new buffer event
                 // TODO check delayed work queue?
-                while !delayed_rx_work.is_empty() {
+                'pop_delayed_rx: while !delayed_rx_work.is_empty() {
                     let Some(buf) = self.rx_buffers.lock().unwrap().pop() else {
-                        break;
+                        break 'pop_delayed_rx;
                     };
                     let (i, data) = delayed_rx_work.pop_front().unwrap();
                     feed_rxq(buf, i, data.as_slice());
@@ -507,9 +477,9 @@ impl IoWorkerData {
                 .unwrap_or_default()
             {
                 self.new_event_buffer_event.read().unwrap();
-                while !delayed_event_work.is_empty() {
+                'pop_delayed_events: while !delayed_event_work.is_empty() {
                     let Some(buf) = self.event_buffers.lock().unwrap().pop() else {
-                        break;
+                        break 'pop_delayed_events;
                     };
                     let ev = delayed_event_work.pop_front().unwrap();
                     if let Err(err) = feed_eventq(buf, ev) {
@@ -517,22 +487,22 @@ impl IoWorkerData {
                     }
                 }
             } else if pollfds[new_event_idx].any().unwrap_or_default() {
-                event_notifier.event_fd.read().unwrap();
-                while let Ok(ev) = event_notifier.event_receiver.try_recv() {
+                notifier.event_fd.read().unwrap();
+                'receive_events: while let Ok(ev) = notifier.event_receiver.try_recv() {
                     let Some(buf) = self.event_buffers.lock().unwrap().pop() else {
                         delayed_event_work.push_back(ev);
-                        continue;
+                        continue 'receive_events;
                     };
                     if let Err(err) = feed_eventq(buf, ev) {
                         log::error!("feed_eventq err: {err}");
                     }
                 }
             } else if pollfds[new_rx_idx].any().unwrap_or_default() {
-                event_notifier.rx_event_fd.read().unwrap();
-                while let Ok((if_index, frame)) = event_notifier.rx_receiver.try_recv() {
+                notifier.rx_event_fd.read().unwrap();
+                'receive_rx: while let Ok((if_index, frame)) = notifier.rx_receiver.try_recv() {
                     let Some(buf) = self.rx_buffers.lock().unwrap().pop() else {
                         delayed_rx_work.push_back((if_index, frame));
-                        continue;
+                        continue 'receive_rx;
                     };
                     feed_rxq(buf, if_index, &frame);
                 }
@@ -553,16 +523,8 @@ impl IoWorkerData {
                 log::debug!("worker status {} event(s)", _no_of_updates);
                 while let Ok(command) = status_receiver.try_recv() {
                     match command {
-                        StatusCommand::Start => {
-                            log::debug!("worker status event = start");
-                            started = true;
-                        }
-                        StatusCommand::Stop => {
-                            log::debug!("worker status event = stop");
-                            started = false;
-                        }
                         StatusCommand::Exit => {
-                            log::debug!("worker status event = exit");
+                            log::debug!("\n\nworker status event = exit\n\n");
                             return;
                         }
                     }
@@ -570,9 +532,9 @@ impl IoWorkerData {
             } else {
                 // CHATTY: log::debug!("work socket read");
                 // check read sockets
-                for (i, fd) in pollfds.iter().skip(eventfds_len).enumerate() {
+                'socket_loop: for (i, fd) in pollfds.iter().skip(eventfds_len).enumerate() {
                     if !fd.any().unwrap_or_default() {
-                        continue;
+                        continue 'socket_loop;
                     }
                     let dup_fd = &socket_fds[i];
                     // CHATTY: log::debug!(
@@ -590,7 +552,7 @@ impl IoWorkerData {
                         Err(Errno::ENETDOWN) => {
                             // Ignore, guest might have brought interface down.
                             // TODO: maybe create ENETDOWN event to guest.
-                            continue;
+                            continue 'socket_loop;
                         }
                         Err(err) => {
                             panic!("{err}");
@@ -619,9 +581,6 @@ impl IoWorkerData {
                     //         panic!("{err}");
                     //     }
                     // };
-                    if !started {
-                        continue;
-                    }
 
                     assert_eq!(packet_data.tp_len as usize, read.bytes);
                     let read = read.bytes.min(packet_data.tp_len as usize);
@@ -646,7 +605,7 @@ impl IoWorkerData {
                     // );
                     let Some(buf) = self.rx_buffers.lock().unwrap().pop() else {
                         delayed_rx_work.push_back((dup_fd.iface_index, iov[0..read].to_vec()));
-                        continue;
+                        continue 'socket_loop;
                     };
                     feed_rxq(buf, dup_fd.iface_index, &iov[0..read]);
                 }

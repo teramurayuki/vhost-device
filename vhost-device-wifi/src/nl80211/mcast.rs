@@ -56,7 +56,7 @@ impl McastListener {
                     .unwrap();
 
                 self.get_scan(index)?;
-            } else if matches!(payload.cmd(), Nl80211Command::Frame) && *msg.nl_pid() == 0 {
+            } else if matches!(payload.cmd(), Nl80211Command::Frame) {
                 log::debug!("MLME FRAME RX");
                 let attr_handle = payload.attrs().get_attr_handle();
                 let frame =
@@ -85,7 +85,7 @@ impl McastListener {
     fn send_rx(&self, mut frame: (u32, Vec<u8>)) {
         while let Err(std::sync::mpsc::SendError(again)) = self.rx_sender.send(frame) {
             frame = again;
-            log::error!("Send error!");
+            panic!("Send error!");
         }
         self.rx_event_fd.write(1).unwrap();
     }
@@ -93,7 +93,7 @@ impl McastListener {
     fn send_scan(&self, mut result: Vec<u8>) {
         while let Err(std::sync::mpsc::SendError(again)) = self.event_sender.send(result) {
             result = again;
-            log::error!("Send error!");
+            panic!("Send error!");
         }
         self.event_fd.write(1).unwrap();
     }

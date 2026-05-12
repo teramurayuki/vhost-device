@@ -45,6 +45,8 @@ pub enum Nl80211Command {
     SetChannel = 65,
     /// `NL80211_CMD_NEW_SCAN_RESULTS`
     NewScanResults = 34,
+    /// `NL80211_CMD_AUTHENTICATE`
+    Authenticate = 37,
     /// `NL80211_CMD_FRAME`
     Frame = 59,
     /// `NL80211_CMD_REGISTER_FRAME`
@@ -1090,7 +1092,7 @@ pub struct Wiphy {
     pub max_match_sets: u8,
     pub support_ibss_rsn: bool,
     pub tdls_external_setup: bool,
-    pub cipher_suites: u32,
+    pub cipher_suites: Vec<u32>,
     pub max_num_pmkids: u8,
     // Protocols other than PAE are supported.
     pub control_port_ethertype: bool,
@@ -1144,6 +1146,15 @@ impl TryFrom<NlMessage> for Wiphy {
                     .next()
                     .ok_or(())?;
                 temp.get_payload_as_with_len::<String>().unwrap()
+            }};
+            ($attr:ident: Vec<$t:ty>) => {{
+                let temp = attr_handles
+                    .extract_if(.., |attr| {
+                        matches!(attr.nla_type().nla_type(), Nl80211Attribute::$attr)
+                    })
+                    .next()
+                    .ok_or(())?;
+                temp.get_payload_as_with_len::<Vec<$t>>().unwrap()
             }};
             ($attr:ident : $t:ty) => {{
                 let temp = attr_handles
@@ -1249,7 +1260,7 @@ impl TryFrom<NlMessage> for Wiphy {
         let max_match_sets = extract!(MaxMatchSets: u8);
         let support_ibss_rsn = extract!(SupportIbssRsn: bool);
         let tdls_external_setup = extract!(TdlsExternalSetup: bool);
-        let cipher_suites = extract!(CipherSuites: u32);
+        let cipher_suites = extract!(CipherSuites: Vec<u32>);
         let max_num_pmkids = extract!(MaxNumPmkids: u8);
         let control_port_ethertype = extract!(ControlPortEthertype: bool);
         let wiphy_antenna_avail_tx = extract!(WiphyAntennaAvailTx: u32);
@@ -1325,6 +1336,7 @@ impl From<&Wiphy> for virtio_wifi::VirtioWifiRadio {
         };
         resp.hwname[..hwname_len].copy_from_slice(&name);
         resp.hwname_len = (hwname_len as u32).into();
+        resp.n_cipher_suites = (wiphy.cipher_suites.len() as u32).into();
         resp
     }
 }
@@ -2129,6 +2141,38 @@ impl Nl80211Socket {
             NlPayload::Payload(
                 GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
                     .cmd(Nl80211Command::Frame)
+                    .attrs(attrs)
+                    .version(1)
+                    .build()?,
+            ),
+        )?;
+        let _recv = recv.into_iter().collect::<Result<Vec<NlMessage>, _>>()?;
+        // dbg!(&_recv);
+        Ok(())
+    }
+
+    pub fn authenticate(&self, iface_index: u32) -> Result<(), Box<dyn Error>> {
+        log::info!("authenticate vif {iface_index}");
+        // TODO
+        let attrs = vec![NlattrBuilder::default()
+            .nla_type(
+                AttrTypeBuilder::default()
+                    .nla_type(Nl80211Attribute::IfIndex)
+                    .build()
+                    .unwrap(),
+            )
+            .nla_payload(iface_index)
+            .build()
+            .unwrap()]
+        .into_iter()
+        .collect::<GenlBuffer<_, _>>();
+
+        let recv = self.inner.send(
+            self.family_id,
+            NlmF::ACK,
+            NlPayload::Payload(
+                GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
+                    .cmd(Nl80211Command::Authenticate)
                     .attrs(attrs)
                     .version(1)
                     .build()?,

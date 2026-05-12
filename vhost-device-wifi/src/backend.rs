@@ -171,22 +171,6 @@ impl VhostUserWifiBackend {
                         }
                     }
                 }
-                virtio_wifi::VIRTIO_WIFI_CMD_GET_WIPHYS => {
-                    let no_wiphys: u32 = self.wiphys.len().try_into().unwrap();
-                    writer
-                        .write_obj(VirtioWifiHdr {
-                            code: virtio_wifi::VIRTIO_WIFI_S_OK.into(),
-                            index: no_wiphys.into(),
-                        })
-                        .map_err(|_| Error::DescriptorWriteFailed)?;
-                    for wiphy in self.wiphys.values() {
-                        let mut resp = virtio_wifi::VirtioWifiRadio::from(wiphy);
-                        resp.ifaces = (self.socket.list_ifaces(wiphy).unwrap().len() as u32).into();
-                        writer
-                            .write_obj(resp)
-                            .map_err(|_| Error::DescriptorWriteFailed)?;
-                    }
-                }
                 virtio_wifi::VIRTIO_WIFI_CMD_GET_INTERFACE => {
                     let iface_index = u32::from(request.index);
                     let mut reader = desc_chain
@@ -231,46 +215,6 @@ impl VhostUserWifiBackend {
                                 .write_obj(VirtioWifiHdr {
                                     code: virtio_wifi::VIRTIO_WIFI_S_BAD_MSG.into(),
                                     index: iface_index.into(),
-                                })
-                                .map_err(|_| Error::DescriptorWriteFailed)?;
-                        }
-                    }
-                }
-                virtio_wifi::VIRTIO_WIFI_CMD_GET_INTERFACES => {
-                    let phy_index = u32::from(request.index);
-                    match self.wiphys.get(&phy_index) {
-                        Some(wiphy) => match self.socket.list_ifaces(wiphy) {
-                            Ok(ifaces) => {
-                                let no_ifaces: u32 = ifaces.len().try_into().unwrap();
-                                writer
-                                    .write_obj(VirtioWifiHdr {
-                                        code: virtio_wifi::VIRTIO_WIFI_S_OK.into(),
-                                        index: no_ifaces.into(),
-                                    })
-                                    .map_err(|_| Error::DescriptorWriteFailed)?;
-                                for iface in ifaces.values() {
-                                    writer
-                                        .write_obj(virtio_wifi::VirtioWifiInterfaceData::from(
-                                            iface,
-                                        ))
-                                        .map_err(|_| Error::DescriptorWriteFailed)?;
-                                }
-                            }
-                            Err(err) => {
-                                log::error!("{err}");
-                                writer
-                                    .write_obj(VirtioWifiHdr {
-                                        code: virtio_wifi::VIRTIO_WIFI_S_IO_ERR.into(),
-                                        index: request.index,
-                                    })
-                                    .map_err(|_| Error::DescriptorWriteFailed)?;
-                            }
-                        },
-                        None => {
-                            writer
-                                .write_obj(VirtioWifiHdr {
-                                    code: virtio_wifi::VIRTIO_WIFI_S_BAD_MSG.into(),
-                                    index: request.index,
                                 })
                                 .map_err(|_| Error::DescriptorWriteFailed)?;
                         }
@@ -378,39 +322,9 @@ impl VhostUserWifiBackend {
                         }
                     }
                 }
-                virtio_wifi::VIRTIO_WIFI_CMD_START_WIPHY => {
+                virtio_wifi::VIRTIO_WIFI_CMD_NEW_INTERFACE => {
                     let phy_index = u32::from(request.index);
-                    log::debug!("VIRTIO_WIFI_CMD_START_WIPHY phy_index={phy_index}");
-                    writer
-                        .write_obj(VirtioWifiHdr {
-                            code: if self.wiphys.contains_key(&phy_index) {
-                                self.io_data.start(&self.io_data_status_sender);
-                                virtio_wifi::VIRTIO_WIFI_S_OK.into()
-                            } else {
-                                virtio_wifi::VIRTIO_WIFI_S_BAD_MSG.into()
-                            },
-                            index: phy_index.into(),
-                        })
-                        .map_err(|_| Error::DescriptorWriteFailed)?;
-                }
-                virtio_wifi::VIRTIO_WIFI_CMD_STOP_WIPHY => {
-                    let phy_index = u32::from(request.index);
-                    log::debug!("VIRTIO_WIFI_CMD_STOP_WIPHY phy_index={phy_index}");
-                    writer
-                        .write_obj(VirtioWifiHdr {
-                            code: if self.wiphys.contains_key(&phy_index) {
-                                self.io_data.stop(&self.io_data_status_sender);
-                                virtio_wifi::VIRTIO_WIFI_S_OK.into()
-                            } else {
-                                virtio_wifi::VIRTIO_WIFI_S_BAD_MSG.into()
-                            },
-                            index: phy_index.into(),
-                        })
-                        .map_err(|_| Error::DescriptorWriteFailed)?;
-                }
-                virtio_wifi::VIRTIO_WIFI_CMD_ADD_INTERFACE => {
-                    let phy_index = u32::from(request.index);
-                    log::debug!("VIRTIO_WIFI_CMD_ADD_INTERFACE phy_index={phy_index}");
+                    log::debug!("VIRTIO_WIFI_CMD_NEW_INTERFACE phy_index={phy_index}");
                     match self.wiphys.get(&phy_index) {
                         Some(wiphy) => {
                             let mut reader = desc_chain
@@ -420,7 +334,7 @@ impl VhostUserWifiBackend {
                             let request = reader
                                 .read_obj::<virtio_wifi::VirtioWifiInterface>()
                                 .map_err(|_| Error::DescriptorReadFailed)?;
-                            log::debug!("VIRTIO_WIFI_CMD_ADD_INTERFACE phy_index={phy_index} request = {request:?}");
+                            log::debug!("VIRTIO_WIFI_CMD_NEW_INTERFACE phy_index={phy_index} request = {request:?}");
                             match self.socket.add_iface(wiphy, request) {
                                 Ok(mut iface) => {
                                     self.io_data.add_ifsocket(
@@ -455,9 +369,9 @@ impl VhostUserWifiBackend {
                         }
                     }
                 }
-                virtio_wifi::VIRTIO_WIFI_CMD_REMOVE_INTERFACE => {
+                virtio_wifi::VIRTIO_WIFI_CMD_DELETE_INTERFACE => {
                     let phy_index = u32::from(request.index);
-                    log::debug!("VIRTIO_WIFI_CMD_REMOVE_INTERFACE phy_index={phy_index}");
+                    log::debug!("VIRTIO_WIFI_CMD_DELETE_INTERFACE phy_index={phy_index}");
                     match self.wiphys.get(&phy_index) {
                         Some(wiphy) => {
                             let mut reader = desc_chain
@@ -467,7 +381,7 @@ impl VhostUserWifiBackend {
                             let request = reader
                                 .read_obj::<virtio_wifi::VirtioWifiInterface>()
                                 .map_err(|_| Error::DescriptorReadFailed)?;
-                            log::debug!("VIRTIO_WIFI_CMD_REMOVE_INTERFACE phy_index={phy_index} request = {request:?}");
+                            log::debug!("VIRTIO_WIFI_CMD_DELETE_INTERFACE phy_index={phy_index} request = {request:?}");
                             let iface_index = request.index.into();
                             let code = match self.socket.del_iface(wiphy, iface_index) {
                                 Ok(()) => {
@@ -497,119 +411,56 @@ impl VhostUserWifiBackend {
                         }
                     }
                 }
-                virtio_wifi::VIRTIO_WIFI_CMD_CHANGE_CONFIGURATION => {
-                    let phy_index = u32::from(request.index);
-                    log::debug!("VIRTIO_WIFI_CMD_CHANGE_CONFIGURATION phy_index={phy_index}");
-                    match self.wiphys.get(&phy_index) {
-                        Some(wiphy) => {
-                            // TODO
-                            writer
-                                .write_obj(VirtioWifiHdr {
-                                    code: virtio_wifi::VIRTIO_WIFI_S_OK.into(),
-                                    index: request.index,
-                                })
-                                .map_err(|_| Error::DescriptorWriteFailed)?;
-                        }
-                        None => {
-                            writer
-                                .write_obj(VirtioWifiHdr {
-                                    code: virtio_wifi::VIRTIO_WIFI_S_BAD_MSG.into(),
-                                    index: request.index,
-                                })
-                                .map_err(|_| Error::DescriptorWriteFailed)?;
-                        }
-                    }
-                }
-                virtio_wifi::VIRTIO_WIFI_CMD_CONFIGURE_RX_FILTER => {
-                    let phy_index = u32::from(request.index);
-                    log::debug!("VIRTIO_WIFI_CMD_CONFIGURE_RX_FILTER phy_index={phy_index}");
-                    match self.wiphys.get(&phy_index) {
-                        Some(wiphy) => {
-                            let mut reader = desc_chain
-                                .clone()
-                                .reader(&mem)
-                                .map_err(|_| Error::DescriptorReadFailed)?;
-                            let virtio_wifi::VirtioWifiConfigureFilter {
-                                changed_flags,
-                                total_flags,
-                                multicast,
-                                ..
-                            } = reader
-                                .read_obj::<virtio_wifi::VirtioWifiConfigureFilter>()
-                                .map_err(|_| Error::DescriptorReadFailed)?;
-                            log::debug!("VIRTIO_WIFI_CMD_CONFIGURE_RX_FILTER changed_flags={changed_flags:X?}, total_flags = {total_flags:X?} multicast = {multicast:X?}");
-                            writer
-                                .write_obj(virtio_wifi::VirtioWifiConfigureFilter {
-                                    hdr: VirtioWifiHdr {
-                                        code: virtio_wifi::VIRTIO_WIFI_S_OK.into(),
-                                        index: request.index,
-                                    },
-                                    changed_flags,
-                                    total_flags,
-                                    multicast,
-                                })
-                                .map_err(|_| Error::DescriptorWriteFailed)?;
-                        }
-                        None => {
-                            writer
-                                .write_obj(VirtioWifiHdr {
-                                    code: virtio_wifi::VIRTIO_WIFI_S_BAD_MSG.into(),
-                                    index: request.index,
-                                })
-                                .map_err(|_| Error::DescriptorWriteFailed)?;
-                        }
-                    }
-                }
-                virtio_wifi::VIRTIO_WIFI_CMD_SET_CHANNEL => {
-                    let phy_index = u32::from(request.index);
-                    log::debug!("VIRTIO_WIFI_CMD_SET_CHANNEL phy_index={phy_index}");
-                    match self.wiphys.get(&phy_index) {
-                        Some(wiphy) => {
-                            // TODO/FIXME: we need a channel context per interface, but for now just
-                            // assume we have one vif in the guest:
-                            let iface_index = self
-                                .socket
-                                .list_ifaces(wiphy)
-                                .map(|ifaces| ifaces.first_key_value().map(|iface| *iface.0));
-                            let mut reader = desc_chain
-                                .clone()
-                                .reader(&mem)
-                                .map_err(|_| Error::DescriptorReadFailed)?;
-                            let chandef = reader
-                                .read_obj::<virtio_wifi::VirtioWifiChannel>()
-                                .map_err(|_| Error::DescriptorReadFailed)?;
-                            log::debug!("VIRTIO_WIFI_CMD_SET_CHANNEL chandef = {chandef:?}");
-                            let code = match iface_index.and_then(|iface_index| {
-                                let Some(iface_index) = iface_index else {
-                                    return Ok(None);
-                                };
-                                self.socket.set_channel(wiphy, iface_index, &chandef)?;
-                                Ok(Some(()))
-                            }) {
-                                Ok(Some(())) => virtio_wifi::VIRTIO_WIFI_S_OK.into(),
-                                Ok(None) => virtio_wifi::VIRTIO_WIFI_S_BAD_MSG.into(),
-                                Err(err) => {
-                                    log::debug!("set channel error: {err}");
-                                    virtio_wifi::VIRTIO_WIFI_S_IO_ERR.into()
-                                }
-                            };
-                            writer
-                                .write_obj(VirtioWifiHdr {
-                                    code,
-                                    index: request.index,
-                                })
-                                .map_err(|_| Error::DescriptorWriteFailed)?;
-                        }
-                        None => {
-                            writer
-                                .write_obj(VirtioWifiHdr {
-                                    code: virtio_wifi::VIRTIO_WIFI_S_BAD_MSG.into(),
-                                    index: request.index,
-                                })
-                                .map_err(|_| Error::DescriptorWriteFailed)?;
-                        }
-                    }
-                }
+                // virtio_wifi::VIRTIO_WIFI_CMD_SET_CHANNEL => {
+                //     let phy_index = u32::from(request.index);
+                //     log::debug!("VIRTIO_WIFI_CMD_SET_CHANNEL phy_index={phy_index}");
+                //     match self.wiphys.get(&phy_index) {
+                //         Some(wiphy) => {
+                //             // TODO/FIXME: we need a channel context per interface, but for now just
+                //             // assume we have one vif in the guest:
+                //             let iface_index = self
+                //                 .socket
+                //                 .list_ifaces(wiphy)
+                //                 .map(|ifaces| ifaces.first_key_value().map(|iface| *iface.0));
+                //             let mut reader = desc_chain
+                //                 .clone()
+                //                 .reader(&mem)
+                //                 .map_err(|_| Error::DescriptorReadFailed)?;
+                //             let chandef = reader
+                //                 .read_obj::<virtio_wifi::VirtioWifiChannel>()
+                //                 .map_err(|_| Error::DescriptorReadFailed)?;
+                //             log::debug!("VIRTIO_WIFI_CMD_SET_CHANNEL chandef = {chandef:?}");
+                //             let code = match iface_index.and_then(|iface_index| {
+                //                 let Some(iface_index) = iface_index else {
+                //                     return Ok(None);
+                //                 };
+                //                 self.socket.set_channel(wiphy, iface_index, &chandef)?;
+                //                 Ok(Some(()))
+                //             }) {
+                //                 Ok(Some(())) => virtio_wifi::VIRTIO_WIFI_S_OK.into(),
+                //                 Ok(None) => virtio_wifi::VIRTIO_WIFI_S_BAD_MSG.into(),
+                //                 Err(err) => {
+                //                     log::debug!("set channel error: {err}");
+                //                     virtio_wifi::VIRTIO_WIFI_S_IO_ERR.into()
+                //                 }
+                //             };
+                //             writer
+                //                 .write_obj(VirtioWifiHdr {
+                //                     code,
+                //                     index: request.index,
+                //                 })
+                //                 .map_err(|_| Error::DescriptorWriteFailed)?;
+                //         }
+                //         None => {
+                //             writer
+                //                 .write_obj(VirtioWifiHdr {
+                //                     code: virtio_wifi::VIRTIO_WIFI_S_BAD_MSG.into(),
+                //                     index: request.index,
+                //                 })
+                //                 .map_err(|_| Error::DescriptorWriteFailed)?;
+                //         }
+                //     }
+                // }
                 virtio_wifi::VIRTIO_WIFI_CMD_TRIGGER_SCAN => {
                     let index = u32::from(request.index);
                     // log::trace!("VIRTIO_WIFI_CMD_TRIGGER_SCAN iface={index}");
@@ -618,6 +469,60 @@ impl VhostUserWifiBackend {
                             Ok(()) => virtio_wifi::VIRTIO_WIFI_S_OK.into(),
                             Err(err) => {
                                 log::error!("trigger scan error: {err}");
+                                virtio_wifi::VIRTIO_WIFI_S_IO_ERR.into()
+                            }
+                        };
+                        writer
+                            .write_obj(VirtioWifiHdr {
+                                code,
+                                index: request.index,
+                            })
+                            .map_err(|_| Error::DescriptorWriteFailed)?;
+                    } else {
+                        writer
+                            .write_obj(VirtioWifiHdr {
+                                code: virtio_wifi::VIRTIO_WIFI_S_BAD_MSG.into(),
+                                index: request.index,
+                            })
+                            .map_err(|_| Error::DescriptorWriteFailed)?;
+                    }
+                }
+                virtio_wifi::VIRTIO_WIFI_CMD_GET_CIPHERSUITES => {
+                    let index = u32::from(request.index);
+                    log::debug!("cipher suites: {index:?}");
+                    match dbg!(self.wiphys.get(&index)) {
+                        Some(wiphy) => {
+                            writer
+                                .write_obj(VirtioWifiHdr {
+                                    code: virtio_wifi::VIRTIO_WIFI_S_OK.into(),
+                                    index: index.into(),
+                                })
+                                .map_err(|_| Error::DescriptorWriteFailed)?;
+                            log::debug!("writing ciphers: {:?}", wiphy.cipher_suites);
+                            for c in &wiphy.cipher_suites {
+                                dbg!(writer
+                                    .write_obj(*c)
+                                    .map_err(|_| Error::DescriptorWriteFailed))?;
+                            }
+                            log::debug!("wrote cipher suites: {:?}", wiphy.cipher_suites);
+                        }
+                        None => {
+                            writer
+                                .write_obj(VirtioWifiHdr {
+                                    code: virtio_wifi::VIRTIO_WIFI_S_BAD_MSG.into(),
+                                    index: index.into(),
+                                })
+                                .map_err(|_| Error::DescriptorWriteFailed)?;
+                        }
+                    }
+                }
+                virtio_wifi::VIRTIO_WIFI_CMD_AUTHENTICATE => {
+                    let index = u32::from(request.index);
+                    if self.interfaces.contains_key(&index) {
+                        let code = match self.socket.authenticate(index) {
+                            Ok(()) => virtio_wifi::VIRTIO_WIFI_S_OK.into(),
+                            Err(err) => {
+                                log::error!("authenticate error: {err}");
                                 virtio_wifi::VIRTIO_WIFI_S_IO_ERR.into()
                             }
                         };
@@ -729,27 +634,29 @@ impl VhostUserWifiBackend {
                 .read_exact(&mut buffer)
                 .map_err(|_| Error::DescriptorReadFailed)?;
 
-            match ::libwifi::parse_frame(&buffer, false) {
+            match etherparse::PacketHeaders::from_ethernet_slice(&buffer) {
+                Err(err) => log::debug!("Error during parsing TX:\n{err:?}"),
                 Ok(frame) => {
-                    log::debug!("Got 802.11 TX frame: {frame:?}");
-                    let code = match self.socket.send_frame(if_index, &buffer) {
-                        Ok(()) => {
-                            log::debug!("txq wrote: {} bytes", buffer.len());
-                            let data_seqno = self.data_seqno;
-                            std::thread::spawn(move || {
-                                std::fs::write(
-                                    std::path::Path::new("./data/tx").join(data_seqno.to_string()),
-                                    &buffer,
-                                )
-                                .unwrap();
-                            });
-                            self.data_seqno += 1;
-                            virtio_wifi::VIRTIO_WIFI_S_OK.into()
-                        }
-                        Err(err) => {
-                            log::error!("Could not TX frame: {err}");
-                            virtio_wifi::VIRTIO_WIFI_S_IO_ERR.into()
-                        }
+                    log::debug!("Got TX 802.3 frame: {frame:?}");
+                }
+            }
+            match self.io_data.ifsockets.lock().unwrap().get(&if_index) {
+                Some(ifsocket) => {
+                    let code = if let Err(err) = ifsocket.write_all(&buffer) {
+                        log::debug!("txq error: {err}");
+                        virtio_wifi::VIRTIO_WIFI_S_IO_ERR.into()
+                    } else {
+                        log::debug!("txq wrote: {} bytes", buffer.len());
+                        let data_seqno = self.data_seqno;
+                        std::thread::spawn(move || {
+                            std::fs::write(
+                                std::path::Path::new("./data/tx").join(data_seqno.to_string()),
+                                &buffer,
+                            )
+                            .unwrap();
+                        });
+                        self.data_seqno += 1;
+                        virtio_wifi::VIRTIO_WIFI_S_OK.into()
                     };
                     writer
                         .write_obj(VirtioWifiHdr {
@@ -758,54 +665,15 @@ impl VhostUserWifiBackend {
                         })
                         .map_err(|_| Error::DescriptorWriteFailed)?;
                 }
-                Err(_err) => match etherparse::PacketHeaders::from_ethernet_slice(&buffer) {
-                    Err(err) => log::debug!("Error during parsing TX:\n{err:?}"),
-                    Ok(frame) => {
-                        log::debug!("Got TX 802.3 frame: {frame:?}");
-                        match self
-                            .io_data
-                            .ifsockets
-                            .lock()
-                            .unwrap()
-                            .get(&request.index.into())
-                        {
-                            Some(ifsocket) => {
-                                let code = if let Err(err) = ifsocket.write_all(&buffer) {
-                                    log::debug!("txq error: {err}");
-                                    virtio_wifi::VIRTIO_WIFI_S_IO_ERR.into()
-                                } else {
-                                    log::debug!("txq wrote: {} bytes", buffer.len());
-                                    let data_seqno = self.data_seqno;
-                                    std::thread::spawn(move || {
-                                        std::fs::write(
-                                            std::path::Path::new("./data/tx")
-                                                .join(data_seqno.to_string()),
-                                            &buffer,
-                                        )
-                                        .unwrap();
-                                    });
-                                    self.data_seqno += 1;
-                                    virtio_wifi::VIRTIO_WIFI_S_OK.into()
-                                };
-                                writer
-                                    .write_obj(VirtioWifiHdr {
-                                        code,
-                                        index: request.index,
-                                    })
-                                    .map_err(|_| Error::DescriptorWriteFailed)?;
-                            }
-                            None => {
-                                writer
-                                    .write_obj(VirtioWifiHdr {
-                                        code: virtio_wifi::VIRTIO_WIFI_S_BAD_MSG.into(),
-                                        index: request.index,
-                                    })
-                                    .map_err(|_| Error::DescriptorWriteFailed)?;
-                            }
-                        }
-                    }
-                },
-            };
+                None => {
+                    writer
+                        .write_obj(VirtioWifiHdr {
+                            code: virtio_wifi::VIRTIO_WIFI_S_BAD_MSG.into(),
+                            index: request.index,
+                        })
+                        .map_err(|_| Error::DescriptorWriteFailed)?;
+                }
+            }
 
             used_len += writer.bytes_written();
             assert!(used_len > 0);

@@ -2,6 +2,7 @@
 // Copyright 2026 Panasonic Automotive Systems Co., Ltd.
 // Author: Manos Pitsidianakis <manos.pitsidianakis@linaro.org>
 
+use crate::bindings::virtio_wifi_uapi;
 use vm_memory::{Be32, ByteValued, Le16, Le32, Le64};
 
 // virtqueues
@@ -30,30 +31,27 @@ pub const VIRTIO_WIFI_VQ_EVENT: u32 = 1;
 pub const VIRTIO_WIFI_VQ_TX: u32 = 2;
 pub const VIRTIO_WIFI_VQ_RX: u32 = 3;
 pub const VIRTIO_WIFI_VQ_MAX: u32 = 4;
-pub const VIRTIO_WIFI_CMD_GET_WIPHY: u32 = 1;
-pub const VIRTIO_WIFI_CMD_GET_WIPHYS: u32 = 2;
-pub const VIRTIO_WIFI_CMD_SET_WIPHY: u32 = 3;
-pub const VIRTIO_WIFI_CMD_GET_INTERFACE: u32 = 4;
-pub const VIRTIO_WIFI_CMD_GET_INTERFACES: u32 = 5;
-pub const VIRTIO_WIFI_CMD_SET_INTERFACE: u32 = 6;
-pub const VIRTIO_WIFI_CMD_NEW_INTERFACE: u32 = 7;
-pub const VIRTIO_WIFI_CMD_DELETE_INTERFACE: u32 = 8;
-pub const VIRTIO_WIFI_CMD_GET_BAND: u32 = 9;
-pub const VIRTIO_WIFI_CMD_GET_BAND_CHANNEL: u32 = 10;
-pub const VIRTIO_WIFI_CMD_GET_BAND_BITRATE: u32 = 11;
-pub const VIRTIO_WIFI_CMD_START_WIPHY: u32 = 12;
-pub const VIRTIO_WIFI_CMD_STOP_WIPHY: u32 = 13;
-pub const VIRTIO_WIFI_CMD_ADD_INTERFACE: u32 = 14;
-pub const VIRTIO_WIFI_CMD_REMOVE_INTERFACE: u32 = 15;
-pub const VIRTIO_WIFI_CMD_CHANGE_CONFIGURATION: u32 = 16;
-pub const VIRTIO_WIFI_CMD_CONFIGURE_RX_FILTER: u32 = 17;
-pub const VIRTIO_WIFI_CMD_SET_CHANNEL: u32 = 18;
-pub const VIRTIO_WIFI_CMD_TRIGGER_SCAN: u32 = 19;
 
-pub const VIRTIO_WIFI_S_OK: u32 = 32768;
-pub const VIRTIO_WIFI_S_BAD_MSG: u32 = 32769;
-pub const VIRTIO_WIFI_S_NOT_SUPP: u32 = 32770;
-pub const VIRTIO_WIFI_S_IO_ERR: u32 = 32771;
+pub const VIRTIO_WIFI_CMD_GET_WIPHY: u32 = virtio_wifi_uapi::VIRTIO_WIFI_CMD_GET_WIPHY;
+pub const VIRTIO_WIFI_CMD_SET_WIPHY: u32 = virtio_wifi_uapi::VIRTIO_WIFI_CMD_SET_WIPHY;
+pub const VIRTIO_WIFI_CMD_GET_INTERFACE: u32 = virtio_wifi_uapi::VIRTIO_WIFI_CMD_GET_INTERFACE;
+pub const VIRTIO_WIFI_CMD_NEW_INTERFACE: u32 = virtio_wifi_uapi::VIRTIO_WIFI_CMD_NEW_INTERFACE;
+pub const VIRTIO_WIFI_CMD_DELETE_INTERFACE: u32 =
+    virtio_wifi_uapi::VIRTIO_WIFI_CMD_DELETE_INTERFACE;
+pub const VIRTIO_WIFI_CMD_GET_BAND: u32 = virtio_wifi_uapi::VIRTIO_WIFI_CMD_GET_BAND;
+pub const VIRTIO_WIFI_CMD_GET_BAND_CHANNEL: u32 =
+    virtio_wifi_uapi::VIRTIO_WIFI_CMD_GET_BAND_CHANNEL;
+pub const VIRTIO_WIFI_CMD_GET_BAND_BITRATE: u32 =
+    virtio_wifi_uapi::VIRTIO_WIFI_CMD_GET_BAND_BITRATE;
+pub const VIRTIO_WIFI_CMD_TRIGGER_SCAN: u32 = virtio_wifi_uapi::VIRTIO_WIFI_CMD_TRIGGER_SCAN;
+pub const VIRTIO_WIFI_CMD_GET_CIPHERSUITES: u32 =
+    virtio_wifi_uapi::VIRTIO_WIFI_CMD_GET_CIPHERSUITES;
+pub const VIRTIO_WIFI_CMD_AUTHENTICATE: u32 = virtio_wifi_uapi::VIRTIO_WIFI_CMD_AUTHENTICATE;
+
+pub const VIRTIO_WIFI_S_OK: u32 = virtio_wifi_uapi::VIRTIO_WIFI_S_OK;
+pub const VIRTIO_WIFI_S_BAD_MSG: u32 = virtio_wifi_uapi::VIRTIO_WIFI_S_BAD_MSG;
+pub const VIRTIO_WIFI_S_NOT_SUPP: u32 = virtio_wifi_uapi::VIRTIO_WIFI_S_NOT_SUPP;
+pub const VIRTIO_WIFI_S_IO_ERR: u32 = virtio_wifi_uapi::VIRTIO_WIFI_S_IO_ERR;
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
@@ -86,6 +84,7 @@ pub struct VirtioWifiRadio {
     pub iftypes: Le32,
     pub available_antennas_tx: Le32,
     pub available_antennas_rx: Le32,
+    pub n_cipher_suites: Le32,
 }
 
 // SAFETY: This struct is plain-old-data.
@@ -135,20 +134,34 @@ impl Default for VirtioWifiInterfaceData {
     }
 }
 
-pub const VIRTIO_WIFI_IFTYPE_UNSPECIFIED: u32 = 0;
-pub const VIRTIO_WIFI_IFTYPE_ADHOC: u32 = 1;
-pub const VIRTIO_WIFI_IFTYPE_STATION: u32 = 2;
-pub const VIRTIO_WIFI_IFTYPE_AP: u32 = 3;
-pub const VIRTIO_WIFI_IFTYPE_AP_VLAN: u32 = 4;
-pub const VIRTIO_WIFI_IFTYPE_WDS: u32 = 5;
-pub const VIRTIO_WIFI_IFTYPE_MONITOR: u32 = 6;
-pub const VIRTIO_WIFI_IFTYPE_MESH_POINT: u32 = 7;
-pub const VIRTIO_WIFI_IFTYPE_P2P_CLIENT: u32 = 8;
-pub const VIRTIO_WIFI_IFTYPE_P2P_GO: u32 = 9;
-pub const VIRTIO_WIFI_IFTYPE_P2P_DEVICE: u32 = 10;
-pub const VIRTIO_WIFI_IFTYPE_OCB: u32 = 11;
-pub const VIRTIO_WIFI_IFTYPE_NAN: u32 = 12;
-pub const VIRTIO_WIFI_IFTYPE_MAX: u32 = 13;
+pub const VIRTIO_WIFI_IFTYPE_UNSPECIFIED: u32 =
+    virtio_wifi_uapi::virtio_wifi_iftype::VIRTIO_WIFI_IFTYPE_UNSPECIFIED as u32;
+pub const VIRTIO_WIFI_IFTYPE_ADHOC: u32 =
+    virtio_wifi_uapi::virtio_wifi_iftype::VIRTIO_WIFI_IFTYPE_ADHOC as u32;
+pub const VIRTIO_WIFI_IFTYPE_STATION: u32 =
+    virtio_wifi_uapi::virtio_wifi_iftype::VIRTIO_WIFI_IFTYPE_STATION as u32;
+pub const VIRTIO_WIFI_IFTYPE_AP: u32 =
+    virtio_wifi_uapi::virtio_wifi_iftype::VIRTIO_WIFI_IFTYPE_AP as u32;
+pub const VIRTIO_WIFI_IFTYPE_AP_VLAN: u32 =
+    virtio_wifi_uapi::virtio_wifi_iftype::VIRTIO_WIFI_IFTYPE_AP_VLAN as u32;
+pub const VIRTIO_WIFI_IFTYPE_WDS: u32 =
+    virtio_wifi_uapi::virtio_wifi_iftype::VIRTIO_WIFI_IFTYPE_WDS as u32;
+pub const VIRTIO_WIFI_IFTYPE_MONITOR: u32 =
+    virtio_wifi_uapi::virtio_wifi_iftype::VIRTIO_WIFI_IFTYPE_MONITOR as u32;
+pub const VIRTIO_WIFI_IFTYPE_MESH_POINT: u32 =
+    virtio_wifi_uapi::virtio_wifi_iftype::VIRTIO_WIFI_IFTYPE_MESH_POINT as u32;
+pub const VIRTIO_WIFI_IFTYPE_P2P_CLIENT: u32 =
+    virtio_wifi_uapi::virtio_wifi_iftype::VIRTIO_WIFI_IFTYPE_P2P_CLIENT as u32;
+pub const VIRTIO_WIFI_IFTYPE_P2P_GO: u32 =
+    virtio_wifi_uapi::virtio_wifi_iftype::VIRTIO_WIFI_IFTYPE_P2P_GO as u32;
+pub const VIRTIO_WIFI_IFTYPE_P2P_DEVICE: u32 =
+    virtio_wifi_uapi::virtio_wifi_iftype::VIRTIO_WIFI_IFTYPE_P2P_DEVICE as u32;
+pub const VIRTIO_WIFI_IFTYPE_OCB: u32 =
+    virtio_wifi_uapi::virtio_wifi_iftype::VIRTIO_WIFI_IFTYPE_OCB as u32;
+pub const VIRTIO_WIFI_IFTYPE_NAN: u32 =
+    virtio_wifi_uapi::virtio_wifi_iftype::VIRTIO_WIFI_IFTYPE_NAN as u32;
+pub const VIRTIO_WIFI_IFTYPE_MAX: u32 =
+    virtio_wifi_uapi::virtio_wifi_iftype::VIRTIO_WIFI_IFTYPE_MAX as u32;
 
 #[derive(Copy, Clone, Debug)]
 #[repr(u32)]

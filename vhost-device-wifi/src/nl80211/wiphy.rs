@@ -1,20 +1,8 @@
-use std::{
-    collections::BTreeMap,
-    error::Error,
-    sync::Arc, //
-};
-
 use neli::{
     attr::Attribute,
-    consts::{
-        nl::{GenlId, NlmF},
-        socket::NlFamily,
-    },
-    genl::{AttrTypeBuilder, Genlmsghdr, GenlmsghdrBuilder, NlattrBuilder, NoUserHeader},
+    consts::nl::GenlId,
+    genl::Genlmsghdr,
     nl::{NlPayload, Nlmsghdr},
-    router::synchronous::{NlRouter, NlRouterReceiverHandle},
-    types::GenlBuffer,
-    utils::Groups,
 };
 
 use super::*;
@@ -39,39 +27,15 @@ pub fn parse_wiphy_properties(
     let mut ret = vec![];
     if let Ok(tx_iter) = attr_handle.get_nested_attributes::<u16>(Nl80211Attribute::TxFrameTypes) {
         let mut types = vec![];
-        // dbg!(&tx_iter.iter().collect::<Vec<_>>());
         for ft in tx_iter.iter() {
-            let index: u16 = u16::from(ft.nla_type()).into();
+            let _index: u16 = u16::from(ft.nla_type()).into();
             let b = ft.get_attr_handle::<Nl80211Attribute>().unwrap();
-            // dbg!(&b.iter().collect::<Vec<_>>());
             for b in b.iter() {
                 let frame_type = b.get_payload_as::<u16>().unwrap();
-                // dbg!(index, &frame_type, FrameType::from(frame_type));
-                // log::debug!("{frame_type:#x}");
-                // dbg!(&libwifi::parsers::parse_frame_control(
-                //     &frame_type.to_le_bytes()
-                // ));
                 types.push(FrameType::from(frame_type));
             }
-            // let frame_type = ft.get_payload_as_with_len::<Vec<u8>>().unwrap();
-            // dbg!(index, &frame_type);
         }
         ret.push(WiphyProperty::TxFrameType(types));
-        // let mut tx_frame_types = vec![];
-        // for elem in tx_frame_types_iter
-        //     .get_nested_attributes::<Nl80211Attribute>()
-        //     .unwrap()
-        //     .iter()
-        // {
-        //     let index: u16 = u16::from(elem.nla_type()).into();
-        //     let frame_type = elem.get_payload_as::<u16>().unwrap();
-
-        //     tx_frame_types.push(frame_type);
-        //     dbg!(&libwifi::parsers::parse_frame_control(
-        //         &frame_type.to_le_bytes()
-        //     ));
-        // }
-        // dbg!(&tx_frame_types);
     }
     if let Ok(rx_iter) = attr_handle.get_nested_attributes::<u16>(Nl80211Attribute::RxFrameTypes) {
         let mut types = vec![];

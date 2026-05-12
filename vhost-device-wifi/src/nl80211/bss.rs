@@ -1,9 +1,4 @@
-use neli::{
-    attr::Attribute,
-    consts::nl::GenlId,
-    genl::{GenlAttrHandle, Genlmsghdr},
-    nl::Nlmsghdr,
-};
+use neli::{attr::Attribute, genl::GenlAttrHandle};
 
 use crate::virtio_wifi;
 
