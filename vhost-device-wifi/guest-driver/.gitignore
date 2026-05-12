@@ -19,6 +19,10 @@ __pycache__
 *.log
 # ftrace data:
 *.dat
+captures
+hostap
+wpa-2.10
+wpa_supplicant.conf
 
 vmlinuz*
 initrd*
