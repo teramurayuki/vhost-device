@@ -423,6 +423,22 @@ struct virtio_wifi_scan_result {
 
 static const int _is_padded____________ =
 	sizeof(struct virtio_wifi_scan_result) != 0;
+
+struct virtio_wifi_authentication_request {
+	struct virtio_wifi_event hdr;
+#define ETH_ALEN 6 /* Octets in one ethernet addr	 */
+	__u8 mac[ETH_ALEN];
+	__le16 reserved0;
+	__le32 auth_type;
+	__le32 freq;
+	__le16 ssid_len;
+#define IEEE80211_MAX_SSID_LEN 32
+	__u8 ssid[IEEE80211_MAX_SSID_LEN];
+	__le16 reserved1;
+};
+
+static const int _is_padded_____________ =
+	sizeof(struct virtio_wifi_authentication_request) != 0;
 #pragma GCC diagnostic pop
 
 #endif /* VIRTIO_WIFI_IF_H */
