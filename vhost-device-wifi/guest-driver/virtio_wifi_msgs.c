@@ -162,8 +162,8 @@ static int virtio_wifi_msg_xfer(struct virtio_wifi_vq *vq,
 	 * sense, so consider any deviation an error.
 	 */
 	if (msg->resp_actual_size != msg->resp_cap) {
-	printk("%s: msg->resp_actual_size=%d: msg->resp_cap=%d\n", __func__,
-	       msg->resp_actual_size, msg->resp_cap);
+		printk("%s: msg->resp_actual_size=%d: msg->resp_cap=%d\n",
+		       __func__, msg->resp_actual_size, msg->resp_cap);
 		return -EINVAL;
 	}
 
@@ -175,7 +175,6 @@ static int virtio_wifi_get_wiphy(struct virtio_wifi *dev, u32 wiphy_idx,
 {
 	struct virtio_wifi_msg *msg;
 	struct virtio_wifi_cmd_request *req;
-	size_t resp_cap = 0;
 
 	int ret = 0;
 
@@ -183,11 +182,9 @@ static int virtio_wifi_get_wiphy(struct virtio_wifi *dev, u32 wiphy_idx,
 
 	printk("%s: getting wiphy %u\n", __func__, wiphy_idx);
 
-	resp_cap = sizeof(struct virtio_wifi_radio);
-
 	msg = virtio_wifi_msg_init(dev, VIRTIO_WIFI_CMD_GET_WIPHY,
 				   sizeof(struct virtio_wifi_cmd_request),
-				   resp_cap);
+				   sizeof(struct virtio_wifi_radio));
 
 	req = msg->req;
 	req->hdr.index = virtio_cpu_to_le(wiphy_idx, req->hdr.index);
@@ -212,7 +209,6 @@ int virtio_wifi_get_band(struct virtio_wifi *dev, u32 wiphy_idx,
 {
 	struct virtio_wifi_msg *msg;
 	struct virtio_wifi_cmd_get_band_request *req;
-	size_t resp_cap = 0;
 
 	int ret = 0;
 
@@ -221,11 +217,10 @@ int virtio_wifi_get_band(struct virtio_wifi *dev, u32 wiphy_idx,
 	printk("%s: getting wiphy %u band %u\n", __func__, wiphy_idx,
 	       band_kind);
 
-	resp_cap = sizeof(struct virtio_wifi_band);
-
 	msg = virtio_wifi_msg_init(
 		dev, VIRTIO_WIFI_CMD_GET_BAND,
-		sizeof(struct virtio_wifi_cmd_get_band_request), resp_cap);
+		sizeof(struct virtio_wifi_cmd_get_band_request),
+		sizeof(struct virtio_wifi_band));
 
 	req = msg->req;
 	req->hdr.index = virtio_cpu_to_le(band_kind, req->hdr.index);
@@ -251,7 +246,6 @@ int virtio_wifi_get_band_bitrate(struct virtio_wifi *dev, u32 wiphy_idx,
 {
 	struct virtio_wifi_msg *msg;
 	struct virtio_wifi_cmd_get_band_bitrate_request *req;
-	size_t resp_cap = 0;
 
 	int ret = 0;
 
@@ -260,12 +254,10 @@ int virtio_wifi_get_band_bitrate(struct virtio_wifi *dev, u32 wiphy_idx,
 	printk("%s: getting wiphy %u band %u\n", __func__, wiphy_idx,
 	       band_kind);
 
-	resp_cap = sizeof(struct virtio_wifi_band_bitrate);
-
 	msg = virtio_wifi_msg_init(
 		dev, VIRTIO_WIFI_CMD_GET_BAND_BITRATE,
 		sizeof(struct virtio_wifi_cmd_get_band_bitrate_request),
-		resp_cap);
+		sizeof(struct virtio_wifi_band_bitrate));
 
 	req = msg->req;
 	req->hdr.index = virtio_cpu_to_le(bitrate_idx, req->hdr.index);
@@ -292,7 +284,6 @@ int virtio_wifi_get_band_channel(struct virtio_wifi *dev, u32 wiphy_idx,
 {
 	struct virtio_wifi_msg *msg;
 	struct virtio_wifi_cmd_get_band_channel_request *req;
-	size_t resp_cap = 0;
 
 	int ret = 0;
 
@@ -301,12 +292,10 @@ int virtio_wifi_get_band_channel(struct virtio_wifi *dev, u32 wiphy_idx,
 	printk("%s: getting wiphy %u band %u\n", __func__, wiphy_idx,
 	       band_kind);
 
-	resp_cap = sizeof(struct virtio_wifi_channel);
-
 	msg = virtio_wifi_msg_init(
 		dev, VIRTIO_WIFI_CMD_GET_BAND_CHANNEL,
 		sizeof(struct virtio_wifi_cmd_get_band_channel_request),
-		resp_cap);
+		sizeof(struct virtio_wifi_channel));
 
 	req = msg->req;
 	req->hdr.index = virtio_cpu_to_le(channel_idx, req->hdr.index);
@@ -320,6 +309,46 @@ int virtio_wifi_get_band_channel(struct virtio_wifi *dev, u32 wiphy_idx,
 	}
 
 	memcpy(channel, msg->resp, sizeof(struct virtio_wifi_channel));
+
+finish:
+	virtio_wifi_msg_release(msg);
+
+	return ret;
+}
+
+int virtio_wifi_get_cipher_suites(struct virtio_wifi *dev, u32 wiphy_idx,
+				  u32 **cipher_suites, int n_cipher_suites)
+{
+	struct virtio_wifi_msg *msg;
+	struct virtio_wifi_hdr *req, *resp;
+
+	int ret = 0;
+
+	BUG_ON(!dev || !cipher_suites);
+
+	msg = virtio_wifi_msg_init(dev, VIRTIO_WIFI_CMD_GET_CIPHERSUITES,
+				   sizeof(struct virtio_wifi_hdr),
+				   sizeof(struct virtio_wifi_hdr) +
+					   n_cipher_suites * sizeof(u32));
+
+	req = msg->req;
+	req->index = virtio_cpu_to_le(wiphy_idx, req->index);
+
+	ret = virtio_wifi_msg_xfer(&dev->controlq, msg, 0);
+	if (ret) {
+		printk("%s: xfer returned %d\n", __func__, ret);
+		goto finish;
+	}
+	resp = msg->resp;
+	*cipher_suites = devm_kzalloc(&dev->virtio_dev->dev,
+				      n_cipher_suites * sizeof(u32),
+				      GFP_KERNEL);
+	if (!*cipher_suites) {
+		ret = -ENOMEM;
+		goto finish;
+	}
+	memcpy(*cipher_suites, msg->resp + sizeof(struct virtio_wifi_hdr),
+	       n_cipher_suites * sizeof(u32));
 
 finish:
 	virtio_wifi_msg_release(msg);
@@ -364,54 +393,6 @@ finish:
 	return ret;
 }
 
-int virtio_wifi_do_start(struct virtio_wifi *dev, u32 wiphy_idx)
-{
-	struct virtio_wifi_msg *msg;
-	struct virtio_wifi_hdr *req;
-
-	int ret = 0;
-
-	BUG_ON(!dev);
-
-	printk("%s: starting wiphy %u\n", __func__, wiphy_idx);
-
-	msg = virtio_wifi_msg_init(dev, VIRTIO_WIFI_CMD_START_WIPHY,
-				   sizeof(struct virtio_wifi_hdr),
-				   sizeof(struct virtio_wifi_hdr));
-
-	req = msg->req;
-	req->index = virtio_cpu_to_le(wiphy_idx, req->index);
-
-	ret = virtio_wifi_msg_xfer(&dev->controlq, msg, 0);
-	virtio_wifi_msg_release(msg);
-
-	return ret;
-}
-
-int virtio_wifi_do_stop(struct virtio_wifi *dev, u32 wiphy_idx)
-{
-	struct virtio_wifi_msg *msg;
-	struct virtio_wifi_hdr *req;
-
-	int ret = 0;
-
-	BUG_ON(!dev);
-
-	printk("%s: stopping wiphy %u\n", __func__, wiphy_idx);
-
-	msg = virtio_wifi_msg_init(dev, VIRTIO_WIFI_CMD_STOP_WIPHY,
-				   sizeof(struct virtio_wifi_hdr),
-				   sizeof(struct virtio_wifi_hdr));
-
-	req = msg->req;
-	req->index = virtio_cpu_to_le(wiphy_idx, req->index);
-
-	ret = virtio_wifi_msg_xfer(&dev->controlq, msg, 0);
-	virtio_wifi_msg_release(msg);
-
-	return ret;
-}
-
 static inline void iface_from_vif(struct virtio_wifi_interface *iface,
 				  struct ieee80211_vif *vif)
 {
@@ -438,7 +419,7 @@ static inline void iface_from_vif(struct virtio_wifi_interface *iface,
 }
 
 int virtio_wifi_do_add_interface(struct virtio_wifi *dev, u32 wiphy_idx,
-enum nl80211_iftype type,
+				 enum nl80211_iftype type,
 				 struct net_device *ndev, u32 *if_index)
 {
 	struct virtio_wifi_msg *msg;
@@ -451,7 +432,7 @@ enum nl80211_iftype type,
 
 	printk("%s: adding interface to wiphy %u\n", __func__, wiphy_idx);
 
-	msg = virtio_wifi_msg_init(dev, VIRTIO_WIFI_CMD_ADD_INTERFACE,
+	msg = virtio_wifi_msg_init(dev, VIRTIO_WIFI_CMD_NEW_INTERFACE,
 				   sizeof(struct virtio_wifi_interface),
 				   sizeof(struct virtio_wifi_interface));
 
@@ -470,7 +451,7 @@ enum nl80211_iftype type,
 	wif = msg->resp;
 	printk("%s: wiphy %u created vif %u type %d\n", __func__, wiphy_idx,
 	       wif->index, type);
-	*if_index = virtio_le_to_cpu(wif->index); 
+	*if_index = virtio_le_to_cpu(wif->index);
 
 	ether_addr_copy(addr, wif->addr);
 	eth_hw_addr_set(ndev, addr);
@@ -494,7 +475,7 @@ int virtio_wifi_do_remove_interface(struct virtio_wifi *dev, u32 wiphy_idx,
 	printk("%s: removing interface %u to wiphy %u\n", __func__, if_index,
 	       wiphy_idx);
 
-	msg = virtio_wifi_msg_init(dev, VIRTIO_WIFI_CMD_REMOVE_INTERFACE,
+	msg = virtio_wifi_msg_init(dev, VIRTIO_WIFI_CMD_DELETE_INTERFACE,
 				   sizeof(struct virtio_wifi_interface),
 				   sizeof(struct virtio_wifi_hdr));
 
@@ -509,55 +490,7 @@ int virtio_wifi_do_remove_interface(struct virtio_wifi *dev, u32 wiphy_idx,
 		goto finish;
 	}
 
-	printk("%s: wiphy %u removed vif %u\n", __func__, wiphy_idx,
-	       if_index);
-finish:
-	virtio_wifi_msg_release(msg);
-	return ret;
-}
-
-#define SUPPORTED_FILTERS			\
-	(FIF_ALLMULTI |				\
-	FIF_CONTROL |				\
-	FIF_PSPOLL |				\
-	FIF_OTHER_BSS |				\
-	FIF_BCN_PRBRESP_PROMISC |		\
-	FIF_PROBE_REQ |				\
-	FIF_MCAST_ACTION |			\
-	FIF_FCSFAIL)
-
-int virtio_wifi_do_configure_filter(struct virtio_wifi *dev, u32 wiphy_idx,
-				    unsigned int changed_flags,
-				    unsigned int *total_flags, u64 multicast)
-{
-	struct virtio_wifi_msg *msg;
-	struct virtio_wifi_configure_filter *req;
-	int ret = 0;
-
-	BUG_ON(!dev);
-
-	/* printk("%s: wiphy %u\n", __func__, wiphy_idx); */
-
-	*total_flags &= SUPPORTED_FILTERS;
-
-	msg = virtio_wifi_msg_init(dev, VIRTIO_WIFI_CMD_CONFIGURE_RX_FILTER,
-				   sizeof(struct virtio_wifi_configure_filter),
-				   sizeof(struct virtio_wifi_configure_filter));
-
-	req = msg->req;
-	req->hdr.index = virtio_cpu_to_le(wiphy_idx, req->hdr.index);
-	req->changed_flags =
-		virtio_cpu_to_le(changed_flags, req->changed_flags);
-	req->total_flags = virtio_cpu_to_le(*total_flags, req->total_flags);
-	req->multicast = virtio_cpu_to_le(multicast, req->multicast);
-
-	ret = virtio_wifi_msg_xfer(&dev->controlq, msg, 0);
-	if (ret) {
-		goto finish;
-	}
-
-	*total_flags = virtio_le_to_cpu(
-		(*(struct virtio_wifi_configure_filter *)msg->resp).total_flags);
+	printk("%s: wiphy %u removed vif %u\n", __func__, wiphy_idx, if_index);
 finish:
 	virtio_wifi_msg_release(msg);
 	return ret;
@@ -720,48 +653,6 @@ static inline const char *chan_width_s(enum nl80211_chan_width w)
 		return "invalid?";
 	}
 };
-
-int virtio_wifi_do_set_channel(struct virtio_wifi_wiphy *wiphy,
-			       struct cfg80211_chan_def *chandef)
-{
-	struct virtio_wifi *dev;
-	struct virtio_wifi_msg *msg;
-	struct virtio_wifi_channel *req;
-	int ret = 0;
-
-	BUG_ON(!wiphy);
-
-	dev = wiphy->virtio_wifi;
-	printk("%s: Requesting to set channel: %d MHz width: %s(%d)\n",
-	       __func__, chandef->chan->center_freq,
-	       chan_width_s(chandef->width), chandef->width);
-
-	msg = virtio_wifi_msg_init(dev, VIRTIO_WIFI_CMD_SET_CHANNEL,
-				   sizeof(struct virtio_wifi_channel),
-				   sizeof(struct virtio_wifi_hdr));
-
-	req = msg->req;
-	req->hdr.index = virtio_cpu_to_le(wiphy->index, req->hdr.index);
-	req->width = virtio_cpu_to_le(chandef->width, req->width);
-	req->band = virtio_cpu_to_le(chandef->chan->band, req->band);
-	req->center_freq =
-		virtio_cpu_to_le(chandef->chan->center_freq, req->center_freq);
-	req->center_freq1 =
-		virtio_cpu_to_le(chandef->center_freq1, req->center_freq1);
-	req->center_freq2 =
-		virtio_cpu_to_le(chandef->center_freq2, req->center_freq2);
-
-	ret = virtio_wifi_msg_xfer(&dev->controlq, msg, 0);
-	if (ret) {
-		goto finish;
-	}
-	printk("%s: Successfully set channel: %d MHz width: %d\n", __func__,
-	       chandef->chan->center_freq, chandef->width);
-
-finish:
-	virtio_wifi_msg_release(msg);
-	return ret;
-}
 
 int virtio_wifi_do_trigger_scan(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 				struct cfg80211_scan_request *req)

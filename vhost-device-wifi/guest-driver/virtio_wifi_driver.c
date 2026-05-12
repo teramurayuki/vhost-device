@@ -220,42 +220,45 @@ static void eventq_callback(struct virtqueue *queue)
 }
 
 static void virtio_wifi_process_event_buf(struct virtio_wifi *virtio_wifi,
-				       void *data, int len)
+					  void *data, int len)
 {
 	struct virtio_wifi_event *event = data;
 	u32 code = virtio_le_to_cpu(event->code);
 	struct virtio_wifi_wiphy *w, *n;
 
 	switch (code) {
-		case VIRTIO_WIFI_EVENT_CODE_SCAN_RESULT:
+	case VIRTIO_WIFI_EVENT_CODE_SCAN_RESULT:
 	case VIRTIO_WIFI_EVENT_CODE_END_SCAN:
 	case VIRTIO_WIFI_EVENT_CODE_CANCEL_SCAN:
-			break;
+		break;
 	default:
-			// TODO print err
-			return;
+		// TODO print err
+		return;
 	}
 
 	spin_lock_bh(&virtio_wifi->wiphys_lock);
 	// step 1 find wiphy based on index
 	list_for_each_entry_safe(w, n, &virtio_wifi->wiphys, node) {
-	switch (code) {
+		switch (code) {
 		case VIRTIO_WIFI_EVENT_CODE_SCAN_RESULT:
 			struct virtio_wifi_scan_result *bss = data;
 			size_t ie_len = bss->ielen;
-			virtio_wifi_cfg80211_inform_bss(w->wiphy, data, (data + sizeof(struct virtio_wifi_scan_result)), ie_len);
+			virtio_wifi_cfg80211_inform_bss(
+				w->wiphy, data,
+				(data + sizeof(struct virtio_wifi_scan_result)),
+				ie_len);
 
 			break;
-	case VIRTIO_WIFI_EVENT_CODE_END_SCAN:
+		case VIRTIO_WIFI_EVENT_CODE_END_SCAN:
 			virtio_wifi_cfg80211_scan_done(w->wiphy);
 			break;
-	case VIRTIO_WIFI_EVENT_CODE_CANCEL_SCAN:
+		case VIRTIO_WIFI_EVENT_CODE_CANCEL_SCAN:
 			virtio_wifi_cfg80211_cancel_scan(w->wiphy);
 			break;
-	default:
+		default:
 			// TODO print err
 			return;
-	}
+		}
 		break;
 	}
 	spin_unlock_bh(&virtio_wifi->wiphys_lock);
@@ -307,7 +310,6 @@ process_bufs:
 		virtqueue_disable_cb(eventq->vq);
 		goto process_bufs;
 	}
-
 }
 
 static void virtio_wifi_event_work(struct work_struct *work)
@@ -437,14 +439,15 @@ process_bufs:
 	}
 }
 
-static int virtio_wifi_init_eventq(struct virtio_wifi *virtio_wifi, u32 num_elems, size_t buf_cap)
+static int virtio_wifi_init_eventq(struct virtio_wifi *virtio_wifi,
+				   u32 num_elems, size_t buf_cap)
 {
 	void **buf_list;
 	struct device *dev = &virtio_wifi->virtio_dev->dev;
 	void *buf;
 	int ret = 0;
 	size_t bytes = 0;
-size_t i = 0;
+	size_t i = 0;
 
 	if (num_elems == 0)
 		return -ENOSPC;
@@ -461,8 +464,7 @@ size_t i = 0;
 
 	for (i = 0; i < num_elems; i++) {
 		buf = devm_kzalloc(dev, buf_cap, GFP_KERNEL);
-		if (!buf)
-		{
+		if (!buf) {
 			ret = -ENOMEM;
 			goto err;
 		}
@@ -482,8 +484,8 @@ finish:
 	return ret;
 }
 
-static int virtio_wifi_populate_eventqvq(struct virtio_wifi *virtio_wifi, u32 buf_cap,
-				   bool lock)
+static int virtio_wifi_populate_eventqvq(struct virtio_wifi *virtio_wifi,
+					 u32 buf_cap, bool lock)
 {
 	unsigned int num_elems, i;
 	struct virtio_wifi_vq *virtio_wifi_vq = &virtio_wifi->eventq;
@@ -516,7 +518,6 @@ static int virtio_wifi_populate_eventqvq(struct virtio_wifi *virtio_wifi, u32 bu
 
 	return 0;
 }
-
 
 static int virtio_wifi_probe(struct virtio_device *virtio_dev)
 {
@@ -630,7 +631,8 @@ static int virtio_wifi_probe(struct virtio_device *virtio_dev)
 		goto err_after_ready;
 	}
 
-	ret = virtio_wifi_init_eventq(vv, virtqueue_get_vring_size(vv->eventq.vq), BUF_CAP);
+	ret = virtio_wifi_init_eventq(
+		vv, virtqueue_get_vring_size(vv->eventq.vq), BUF_CAP);
 	if (ret) {
 		goto err_after_ready;
 	}
@@ -649,7 +651,6 @@ static int virtio_wifi_probe(struct virtio_device *virtio_dev)
 	if (ret) {
 		goto err_after_ready;
 	}
-
 
 	return 0;
 

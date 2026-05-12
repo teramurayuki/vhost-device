@@ -61,6 +61,8 @@ struct virtio_wifi_wiphy {
 	u32 hwname_len;
 	char hwname[64];
 	bool is_monitoring;
+	u32 *cipher_suites;
+	int n_cipher_suites;
 	struct ieee80211_supported_band bands[NUM_NL80211_BANDS];
 	struct ieee80211_hw *hw;
 	struct device *dev;
@@ -153,26 +155,19 @@ int virtio_wifi_get_band_channel(struct virtio_wifi *dev, u32 wiphy_idx,
 int virtio_wifi_get_band(struct virtio_wifi *dev, u32 wiphy_idx,
 			 enum nl80211_band band_kind,
 			 struct virtio_wifi_band *band);
-extern const struct ieee80211_ops virtio_wifi_ieee80211_ops;
+int virtio_wifi_get_cipher_suites(struct virtio_wifi *dev, u32 wiphy_idx,
+				  u32 **cipher_suites, int n_cipher_suites);
 int virtio_wifi_do_register_wiphys(struct virtio_wifi *dev);
-int virtio_wifi_do_start(struct virtio_wifi *dev, u32 wiphy_idx);
-int virtio_wifi_do_stop(struct virtio_wifi *dev, u32 wiphy_idx);
 int virtio_wifi_do_add_interface(struct virtio_wifi *dev, u32 wiphy_idx,
-				enum nl80211_iftype type,
+				 enum nl80211_iftype type,
 				 struct net_device *ndev, u32 *if_index);
 int virtio_wifi_do_remove_interface(struct virtio_wifi *dev, u32 wiphy_idx,
 				    u32 if_index);
-int virtio_wifi_do_configure_filter(struct virtio_wifi *dev, u32 wiphy_idx,
-				    unsigned int changed_flags,
-				    unsigned int *total_flags, u64 multicast);
 int virtio_wifi_do_tx(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 		      struct sk_buff *skb);
 int virtio_wifi_do_trigger_scan(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 				struct cfg80211_scan_request *req);
-void virtio_wifi_hw_scan_work(struct work_struct *work);
 void virtio_wifi_do_tx_work(struct work_struct *work);
-int virtio_wifi_do_set_channel(struct virtio_wifi_wiphy *wiphy,
-			       struct cfg80211_chan_def *chandef);
 
 /*FIXME:remove*/
 static inline const char *cmd_to_s(u32 cmd)
@@ -180,16 +175,10 @@ static inline const char *cmd_to_s(u32 cmd)
 	switch (cmd) {
 	case VIRTIO_WIFI_CMD_GET_WIPHY:
 		return "VIRTIO_WIFI_CMD_GET_WIPHY";
-	case VIRTIO_WIFI_CMD_GET_WIPHYS:
-		return "VIRTIO_WIFI_CMD_GET_WIPHYS";
 	case VIRTIO_WIFI_CMD_SET_WIPHY:
 		return "VIRTIO_WIFI_CMD_SET_WIPHY";
 	case VIRTIO_WIFI_CMD_GET_INTERFACE:
 		return "VIRTIO_WIFI_CMD_GET_INTERFACE";
-	case VIRTIO_WIFI_CMD_GET_INTERFACES:
-		return "VIRTIO_WIFI_CMD_GET_INTERFACES";
-	case VIRTIO_WIFI_CMD_SET_INTERFACE:
-		return "VIRTIO_WIFI_CMD_SET_INTERFACE";
 	case VIRTIO_WIFI_CMD_NEW_INTERFACE:
 		return "VIRTIO_WIFI_CMD_NEW_INTERFACE";
 	case VIRTIO_WIFI_CMD_DELETE_INTERFACE:
@@ -200,22 +189,12 @@ static inline const char *cmd_to_s(u32 cmd)
 		return "VIRTIO_WIFI_CMD_GET_BAND_CHANNEL";
 	case VIRTIO_WIFI_CMD_GET_BAND_BITRATE:
 		return "VIRTIO_WIFI_CMD_GET_BAND_BITRATE";
-	case VIRTIO_WIFI_CMD_START_WIPHY:
-		return "VIRTIO_WIFI_CMD_START_WIPHY";
-	case VIRTIO_WIFI_CMD_STOP_WIPHY:
-		return "VIRTIO_WIFI_CMD_STOP_WIPHY";
-	case VIRTIO_WIFI_CMD_ADD_INTERFACE:
-		return "VIRTIO_WIFI_CMD_ADD_INTERFACE";
-	case VIRTIO_WIFI_CMD_REMOVE_INTERFACE:
-		return "VIRTIO_WIFI_CMD_REMOVE_INTERFACE";
-	case VIRTIO_WIFI_CMD_CHANGE_CONFIGURATION:
-		return "VIRTIO_WIFI_CMD_CHANGE_CONFIGURATION";
-	case VIRTIO_WIFI_CMD_CONFIGURE_RX_FILTER:
-		return "VIRTIO_WIFI_CMD_CONFIGURE_RX_FILTER";
-	case VIRTIO_WIFI_CMD_SET_CHANNEL:
-	 return "VIRTIO_WIFI_CMD_SET_CHANNEL";
 	case VIRTIO_WIFI_CMD_TRIGGER_SCAN:
-	return "VIRTIO_WIFI_CMD_TRIGGER_SCAN";
+		return "VIRTIO_WIFI_CMD_TRIGGER_SCAN";
+	case VIRTIO_WIFI_CMD_GET_CIPHERSUITES:
+		return "VIRTIO_WIFI_CMD_GET_CIPHERSUITES";
+	case VIRTIO_WIFI_CMD_AUTHENTICATE:
+		return "VIRTIO_WIFI_CMD_AUTHENTICATE";
 	case VIRTIO_WIFI_S_OK:
 		return "VIRTIO_WIFI_S_OK";
 	case VIRTIO_WIFI_S_BAD_MSG:
@@ -235,7 +214,9 @@ struct virtio_wifi_wiphy *
 virtio_wifi_cfg80211_make_wiphy(struct virtio_wifi *dev,
 				struct virtio_wifi_radio *radio);
 void virtio_wifi_cfg80211_destroy_wiphy(struct wiphy *wiphy);
-void virtio_wifi_cfg80211_inform_bss(struct wiphy *wiphy, struct virtio_wifi_scan_result *bss, void *ie, size_t ie_len);
+void virtio_wifi_cfg80211_inform_bss(struct wiphy *wiphy,
+				     struct virtio_wifi_scan_result *bss,
+				     void *ie, size_t ie_len);
 void virtio_wifi_cfg80211_scan_done(struct wiphy *wiphy);
 void virtio_wifi_cfg80211_cancel_scan(struct wiphy *wiphy);
 #endif // __VIRTIO_WIFI_H
