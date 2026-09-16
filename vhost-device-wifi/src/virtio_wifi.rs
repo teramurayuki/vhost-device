@@ -2,6 +2,11 @@
 // Copyright 2026 Panasonic Automotive Systems Co., Ltd.
 // Author: Manos Pitsidianakis <manos.pitsidianakis@linaro.org>
 
+use std::io::Read;
+
+use thiserror::Error as ThisError;
+use vm_memory::Le32;
+
 bitflags::bitflags! {
     #[doc(alias = "ieee80211_channel_flags")]
     pub struct IEEE80211ChannelFlags: u32 {
@@ -61,4 +66,42 @@ bitflags::bitflags! {
         /// `IEEE80211_CHAN_NO_16MHZ`
        const NO_16MHZ			= 1 << 30;
     }
+}
+
+#[derive(Debug, ThisError)]
+pub enum Error {
+    #[error("Reading from descriptor failed: {0}")]
+    DescriptorReadFailed(std::io::Error),
+    #[error("Invalid Type-Length-Value, type={0}, length={1}, actual length = {2}")]
+    InvalidTLV(u32, u32, usize),
+    #[error("Insufficient bytes in reader: {0} bytes")]
+    InsufficientData(usize),
+}
+
+pub fn read_tlv(reader: &mut virtio_queue::Reader<'_>) -> Result<Option<(u32, Vec<u8>)>, Error> {
+    use crate::bindings::virtio_wifi_uapi::virtio_wifi_tlv;
+
+    if reader.available_bytes() == 0 {
+        return Ok(None);
+    }
+    if reader.available_bytes() < core::mem::size_of::<virtio_wifi_tlv>() {
+        return Err(Error::InsufficientData(reader.available_bytes()));
+    }
+    let type_: u32 = reader
+        .read_obj::<Le32>()
+        .map_err(Error::DescriptorReadFailed)?
+        .into();
+    let length: u32 = reader
+        .read_obj::<Le32>()
+        .map_err(Error::DescriptorReadFailed)?
+        .into();
+    if reader.available_bytes() < length as usize {
+        return Err(Error::InvalidTLV(type_, length, reader.available_bytes()));
+    }
+    let mut data = vec![0; length as usize];
+    reader
+        .read_exact(&mut data)
+        .map_err(Error::DescriptorReadFailed)?;
+
+    Ok(Some((type_, data)))
 }

@@ -77,6 +77,7 @@ fn main() {
                 virtio_wifi_band_bitrate,
                 virtio_wifi_band_sta_vht_cap,
                 virtio_wifi_band_sta_vht_cap_virtio_wifi_vht_mcs_info,
+                virtio_wifi_beacon,
                 virtio_wifi_change_station,
                 virtio_wifi_channel,
                 virtio_wifi_cmd_get_band_bitrate_request,
@@ -89,10 +90,12 @@ fn main() {
                 virtio_wifi_interface,
                 virtio_wifi_interface_virtio_wifi_interface_cfg,
                 virtio_wifi_key,
+                virtio_wifi_register_frame,
                 virtio_wifi_scan_result,
                 virtio_wifi_set_if_operstate,
                 virtio_wifi_sta_ht_cap,
                 virtio_wifi_sta_ht_cap_mcs_info,
+                virtio_wifi_station_change,
         })
         .status()
         .expect("failed to execute process");

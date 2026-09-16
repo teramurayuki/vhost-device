@@ -20,12 +20,30 @@ use neli::{
 
 use super::*;
 
+/**
+ * enum nl80211_ap_sme_features - device-integrated AP features
+ * @NL80211_AP_SME_SA_QUERY_OFFLOAD: SA Query procedures offloaded to driver
+ * when user space indicates support for SA Query procedures offload during
+ * "start ap" with %NL80211_AP_SETTINGS_SA_QUERY_OFFLOAD_SUPPORT.
+ */
+#[repr(u32)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Ord, PartialOrd)]
+pub enum Nl80211ApSmeFeatures {
+    // NL80211_AP_SME_SA_QUERY_OFFLOAD		= 1 << 0,
+    SaQueryOffload = 1,
+}
+
 #[derive(Debug)]
 pub enum WiphyProperty {
     TxFrameType(BTreeSet<FrameType>),
     RxFrameType(BTreeSet<FrameType>),
     SupportedCommands(BTreeSet<Nl80211Command>),
     ExtFeatures(BTreeSet<Nl80211ExtFeatureIndex>),
+    // NL80211_ATTR_DEVICE_AP_SME: This u32 attribute may be listed for devices
+    //  *	that have AP support to indicate that they have the AP SME integrated
+    //  *	with support for the features listed in this attribute, see
+    //  *	&enum nl80211_ap_sme_features.
+    ApSme(BTreeSet<Nl80211ApSmeFeatures>),
 }
 
 /// `nl80211_ext_feature_index`
@@ -334,6 +352,13 @@ pub fn parse_wiphy_properties(
             Nl80211ExtFeatureIndex::from_bit_array(&ext_features),
         ));
     }
+    if let Ok(ap_sme) = attr_handle.get_attr_payload_as::<u32>(Nl80211Attribute::DeviceApSme) {
+        let mut ap_sme_properties = BTreeSet::default();
+        if ap_sme & Nl80211ApSmeFeatures::SaQueryOffload as u32 > 0 {
+            ap_sme_properties.insert(Nl80211ApSmeFeatures::SaQueryOffload);
+        }
+        ret.push(WiphyProperty::ApSme(ap_sme_properties));
+    }
     ret
 }
 
@@ -509,6 +534,7 @@ pub struct Wiphy {
     //    pub ht_capability_mask: u32,
     pub supported_tx_frames: BTreeSet<FrameType>,
     pub supported_rx_frames: BTreeSet<FrameType>,
+    pub ap_sme: Option<BTreeSet<Nl80211ApSmeFeatures>>,
 }
 
 impl TryFrom<NlMessage> for Wiphy {
@@ -736,6 +762,7 @@ impl TryFrom<NlMessage> for Wiphy {
             //ht_capability_mask,
             supported_tx_frames: BTreeSet::default(),
             supported_rx_frames: BTreeSet::default(),
+            ap_sme: None,
         };
         ret.set_properties(extra_properties);
         Ok(ret)
@@ -744,9 +771,7 @@ impl TryFrom<NlMessage> for Wiphy {
 
 impl From<&Wiphy> for virtio_wifi::virtio_wifi_config {
     fn from(wiphy: &Wiphy) -> Self {
-        let flags = (u32::from(wiphy.auth_supported())
-            * virtio_wifi::VIRTIO_WIFI_RADIO_F_AUTHENTICATE)
-            | (u32::from(wiphy.connect_supported()) * virtio_wifi::VIRTIO_WIFI_RADIO_F_CONNECT);
+        let flags = u32::from(wiphy.ap_sme.is_some()) * virtio_wifi::VIRTIO_WIFI_FLAG_AP_SME;
         Self {
             // Must be set by caller.
             num_of_ifaces: 0.into(),
@@ -789,6 +814,11 @@ impl Wiphy {
                 WiphyProperty::ExtFeatures(ext_features) => {
                     self.ext_features.extend(ext_features);
                 }
+                WiphyProperty::ApSme(val) => {
+                    let ap_sme = self.ap_sme.get_or_insert_default();
+                    log::warn!("ApSme = {val:?}");
+                    ap_sme.extend(val);
+                }
             }
         }
     }
@@ -798,5 +828,8 @@ impl Wiphy {
         deauth_supported => Nl80211Command::Deauthenticate,
         connect_supported => Nl80211Command::Connect,
         disconnect_supported => Nl80211Command::Disconnect,
+        set_interface_supported => Nl80211Command::SetInterface,
+        start_ap_supported => Nl80211Command::StartAp,
+        register_frame_supported => Nl80211Command::Frame,
     }
 }

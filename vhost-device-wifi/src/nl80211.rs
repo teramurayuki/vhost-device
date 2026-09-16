@@ -26,7 +26,7 @@ use neli::{
     utils::Groups,
 };
 use nix::{errno::Errno, sys::eventfd::EventFd};
-use vm_memory::ByteValued;
+use vm_memory::{ByteValued, Le32};
 
 use crate::{bindings::virtio_wifi_uapi as virtio_wifi, virtio_wifi::IEEE80211ChannelFlags};
 
@@ -38,6 +38,11 @@ mod wiphy;
 use wiphy::*;
 pub use wiphy::{FrameType, Wiphy};
 
+mod keys;
+mod station;
+use keys::*;
+
+#[macro_export]
 macro_rules! attr {
     ($t:ident::$attr:ident = $val:expr) => {{
         NlattrBuilder::default()
@@ -1242,16 +1247,6 @@ pub enum Nl80211BitrateAttr {
 
 impl neli::consts::genl::NlAttrType for Nl80211BitrateAttr {}
 
-// enum nl80211_key_default_types
-#[neli::neli_enum(serialized_type = "u16")]
-pub enum Nl80211KeyDefaultTypes {
-    Invalid = 0,
-    Unicast = 1,
-    Multicast = 2,
-}
-
-impl neli::consts::genl::NlAttrType for Nl80211KeyDefaultTypes {}
-
 #[neli::neli_enum(serialized_type = "u32")]
 pub enum Nl80211IfType {
     Unspecified = 0,
@@ -1359,8 +1354,17 @@ impl From<&Band> for virtio_wifi::virtio_wifi_band {
 }
 
 #[derive(Debug)]
+pub enum BadMessageError {
+    Read(crate::virtio_wifi::Error),
+    DuplicateTLV(u32),
+    InvalidValue(&'static str, Vec<u8>),
+    NotFound,
+}
+
+#[derive(Debug)]
 pub enum Nl80211Error {
     LogicError(String),
+    BadMessage(BadMessageError),
     RouterError {
         inner: Box<dyn std::error::Error>,
         code: Errno,
@@ -1370,6 +1374,12 @@ pub enum Nl80211Error {
 impl std::fmt::Display for Nl80211Error {
     fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(fmt, "{self:?}")
+    }
+}
+
+impl From<BadMessageError> for Nl80211Error {
+    fn from(err: BadMessageError) -> Self {
+        Self::BadMessage(err)
     }
 }
 
@@ -1397,6 +1407,22 @@ impl From<neli::err::SerError> for Nl80211Error {
     }
 }
 
+impl From<neli::err::DeError> for Nl80211Error {
+    fn from(err: neli::err::DeError) -> Self {
+        Self::LogicError(err.to_string())
+    }
+}
+
+#[neli::neli_enum(serialized_type = "u16")]
+pub enum ExtAckAttr {
+    Unused = 0,
+    Msg = 1,
+    Offs = 2,
+    Cookie = 3,
+    Policy = 4,
+}
+impl neli::consts::genl::NlAttrType for ExtAckAttr {}
+
 impl<T: std::fmt::Debug + 'static, P: std::fmt::Debug + 'static> From<neli::err::RouterError<T, P>>
     for Nl80211Error
 {
@@ -1416,6 +1442,26 @@ impl<T: std::fmt::Debug + 'static, P: std::fmt::Debug + 'static> From<neli::err:
                 code: Errno::EIO,
             },
             RouterError::Nlmsgerr(ref nlmsgerr) => {
+                for attr in nlmsgerr.ext_ack().iter() {
+                    match ExtAckAttr::from(u16::from(attr.nla_type())) {
+                        ExtAckAttr::Msg => {
+                            log::error!(
+                                "Msg={:?}",
+                                String::from_utf8(attr.nla_payload().as_ref().to_vec())
+                            );
+                        }
+                        ExtAckAttr::Offs => {
+                            log::error!("Offs={:?}", attr.nla_payload().as_ref());
+                        }
+                        ExtAckAttr::Cookie => {
+                            log::error!("Cookie={:?}", attr.nla_payload().as_ref());
+                        }
+                        ExtAckAttr::Policy => {
+                            log::error!("Policy={:?}", attr.nla_payload().as_ref());
+                        }
+                        _ => log::error!("attr: {attr:?}"),
+                    }
+                }
                 let code = Errno::from_raw(nlmsgerr.error().abs());
 
                 Self::RouterError {
@@ -1424,6 +1470,12 @@ impl<T: std::fmt::Debug + 'static, P: std::fmt::Debug + 'static> From<neli::err:
                 }
             }
         }
+    }
+}
+
+impl From<crate::virtio_wifi::Error> for Nl80211Error {
+    fn from(err: crate::virtio_wifi::Error) -> Self {
+        Self::BadMessage(BadMessageError::Read(err))
     }
 }
 
@@ -1439,6 +1491,10 @@ impl From<Nl80211Error> for u32 {
                 Errno::EOPNOTSUPP => virtio_wifi::VIRTIO_WIFI_S_NOT_SUPP,
                 _ => virtio_wifi::VIRTIO_WIFI_S_IO_ERR,
             },
+            Nl80211Error::BadMessage(BadMessageError::Read(
+                crate::virtio_wifi::Error::DescriptorReadFailed(_),
+            )) => virtio_wifi::VIRTIO_WIFI_S_IO_ERR,
+            Nl80211Error::BadMessage(_) => virtio_wifi::VIRTIO_WIFI_S_BAD_MSG,
         }
     }
 }
@@ -1828,11 +1884,13 @@ impl Nl80211Socket {
         ))
     }
 
-    pub fn list_wiphys(&self) -> Result<BTreeMap<u32, Wiphy>, Nl80211Error> {
-        let attrs = vec![attr!(Nl80211Attribute::Wiphy = ())]
-            .into_iter()
-            .collect::<GenlBuffer<_, _>>();
+    pub fn reload(&mut self) -> Result<Notifier, Box<dyn Error>> {
+        let (new, notifier) = Self::new()?;
+        *self = new;
+        Ok(notifier)
+    }
 
+    pub fn list_wiphys(&self) -> Result<BTreeMap<u32, Wiphy>, Nl80211Error> {
         let recv = self.inner.send(
             self.family_id,
             NlmF::DUMP | NlmF::ACK,
@@ -1840,7 +1898,6 @@ impl Nl80211Socket {
                 GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
                     .cmd(Nl80211Command::GetWiphy)
                     .version(1)
-                    .attrs(attrs)
                     .build()?,
             ),
         )?;
@@ -1890,12 +1947,9 @@ impl Nl80211Socket {
     pub fn list_ifaces(&self, wiphy: &Wiphy) -> Result<BTreeMap<u32, Interface>, Nl80211Error> {
         let index = wiphy.index;
 
-        let attrs = vec![
-            attr!(Nl80211Attribute::Wiphy = index),
-            attr!(Nl80211Attribute::IfName = ()),
-        ]
-        .into_iter()
-        .collect::<GenlBuffer<_, _>>();
+        let attrs = vec![attr!(Nl80211Attribute::Wiphy = index)]
+            .into_iter()
+            .collect::<GenlBuffer<_, _>>();
 
         let recv = self.inner.send(
             self.family_id,
@@ -1923,6 +1977,8 @@ impl Nl80211Socket {
     ) -> Result<Interface, Nl80211Error> {
         let index = wiphy.index;
         log::trace!("Requesting new vif on wiphy {index}");
+        // TODO: iftype
+        // TODO: ifname?
         let mut attrs = vec![
             attr!(Nl80211Attribute::Wiphy = index),
             attr!(Nl80211Attribute::IfType = Nl80211IfType::Station),
@@ -2058,7 +2114,7 @@ impl Nl80211Socket {
 
         let recv = self.inner.send(
             self.family_id,
-            NlmF::ACK,
+            NlmF::REQUEST | NlmF::ACK,
             NlPayload::Payload(
                 GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
                     .cmd(Nl80211Command::TriggerScan)
@@ -2091,7 +2147,7 @@ impl Nl80211Socket {
 
         let recv = self.inner.send(
             self.family_id,
-            NlmF::ACK,
+            NlmF::REQUEST | NlmF::ACK,
             NlPayload::Payload(
                 GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
                     .cmd(Nl80211Command::RegisterFrame)
@@ -2117,7 +2173,7 @@ impl Nl80211Socket {
         &self,
         iface_index: u32,
         req: &virtio_wifi::virtio_wifi_authentication_request,
-        ie: &[u8],
+        mut reader: virtio_queue::Reader<'_>,
     ) -> Result<(), Nl80211Error> {
         log::debug!("authenticate vif {iface_index} req={req:#?}");
 
@@ -2125,26 +2181,43 @@ impl Nl80211Socket {
         let ssid = &req.ssid[..u16::from(req.ssid_len).into()];
         let freq = u32::from(req.freq);
         let freq_offset = u32::from(req.freq_offset);
-        let auth_type = u32::from(req.auth_type);
 
-        // Warning: if ssid is empty, the response cannot be deserialized; there is some
-        // kind of error response that neli cannot parse maybe.
+        let mut tlvs: BTreeMap<u32, Vec<u8>> = BTreeMap::default();
+        while let Some((t, v)) = crate::virtio_wifi::read_tlv(&mut reader)? {
+            if tlvs.insert(t, v).is_some() {
+                return Err(Nl80211Error::BadMessage(BadMessageError::DuplicateTLV(t)));
+            }
+        }
+
         let mut attrs = vec![
             attr!(Nl80211Attribute::IfIndex = iface_index),
             attr!(Nl80211Attribute::Mac = bssid),
-            attr!(Nl80211Attribute::Ssid = ssid),
             attr!(Nl80211Attribute::WiphyFreq = freq),
             attr!(Nl80211Attribute::WiphyFreqOffset = freq_offset),
-            attr!(Nl80211Attribute::AuthType = auth_type),
         ];
+        if !ssid.is_empty() {
+            attrs.push(attr!(Nl80211Attribute::Ssid = ssid));
+        }
+        if let Some(auth_type) = tlvs.remove(&virtio_wifi::VIRTIO_WIFI_AUTH_REQ_AUTH_TYPE) {
+            let Some(auth_type) = Le32::from_slice(&auth_type) else {
+                return Err(Nl80211Error::BadMessage(BadMessageError::InvalidValue(
+                    "VIRTIO_WIFI_BEACON_AUTH_TYPE",
+                    auth_type,
+                )));
+            };
+            attrs.push(attr!(Nl80211Attribute::AuthType = u32::from(*auth_type)));
+        }
 
-        if !ie.is_empty() {
+        if let Some(ie) = tlvs.remove(&virtio_wifi::VIRTIO_WIFI_AUTH_REQ_IE) {
             attrs.push(attr!(Nl80211Attribute::Ie = ie));
+        }
+        if !tlvs.is_empty() {
+            log::warn!("Unrecognized TLVs: {tlvs:?}");
         }
         let attrs = attrs.into_iter().collect::<GenlBuffer<_, _>>();
         let recv = self.inner.send(
             self.family_id,
-            NlmF::ACK,
+            NlmF::REQUEST | NlmF::ACK,
             NlPayload::Payload(
                 GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
                     .cmd(Nl80211Command::Authenticate)
@@ -2162,7 +2235,7 @@ impl Nl80211Socket {
         &self,
         iface_index: u32,
         req: &virtio_wifi::virtio_wifi_association_request,
-        ie: &[u8],
+        mut reader: virtio_queue::Reader<'_>,
     ) -> Result<(), Nl80211Error> {
         log::debug!("associate vif {iface_index}");
 
@@ -2182,6 +2255,12 @@ impl Nl80211Socket {
         let n_akm_suites = u32::from(req.n_akm_suites) as usize;
         for i in 0..n_akm_suites {
             akm_suites[i] = req.akm_suites[i].into();
+        }
+        let mut tlvs: BTreeMap<u32, Vec<u8>> = BTreeMap::default();
+        while let Some((t, v)) = crate::virtio_wifi::read_tlv(&mut reader)? {
+            if tlvs.insert(t, v).is_some() {
+                return Err(Nl80211Error::BadMessage(BadMessageError::DuplicateTLV(t)));
+            }
         }
         let mut attrs = vec![
             attr!(Nl80211Attribute::IfIndex = iface_index),
@@ -2207,13 +2286,16 @@ impl Nl80211Socket {
             attrs.push(attr!(Nl80211Attribute::CipherSuiteGroup = cipher_group));
         }
 
-        if !ie.is_empty() {
+        if let Some(ie) = tlvs.remove(&virtio_wifi::VIRTIO_WIFI_ASSOC_REQ_IE) {
             attrs.push(attr!(Nl80211Attribute::Ie = ie));
+        }
+        if !tlvs.is_empty() {
+            log::warn!("Unrecognized TLVs: {tlvs:?}");
         }
         let attrs = attrs.into_iter().collect::<GenlBuffer<_, _>>();
         let recv = self.inner.send(
             self.family_id,
-            NlmF::ACK,
+            NlmF::REQUEST | NlmF::ACK,
             NlPayload::Payload(
                 GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
                     .cmd(Nl80211Command::Associate)
@@ -2231,32 +2313,41 @@ impl Nl80211Socket {
         &self,
         iface_index: u32,
         req: &virtio_wifi::virtio_wifi_key,
-        key: &[u8],
-        seq: &[u8],
+        mut reader: virtio_queue::Reader<'_>,
     ) -> Result<(), Nl80211Error> {
         log::debug!("add_key to vif {iface_index}");
 
         let mac = req.mac.as_slice();
-        let cipher: u32 = req.cipher.into();
+        let mut tlvs: BTreeMap<u32, Vec<u8>> = BTreeMap::default();
+        while let Some((t, v)) = crate::virtio_wifi::read_tlv(&mut reader)? {
+            if tlvs.insert(t, v).is_some() {
+                return Err(Nl80211Error::BadMessage(BadMessageError::DuplicateTLV(t)));
+            }
+        }
+
         let mut attrs = vec![
             attr!(Nl80211Attribute::IfIndex = iface_index),
-            attr!(Nl80211Attribute::KeyIdx = req.key_index),
-            attr!(Nl80211Attribute::KeyCipher = cipher),
-            attr!(Nl80211Attribute::KeyData = key),
-            attr!(Nl80211Attribute::KeySeq = seq),
+            key_attr_from_req(
+                req,
+                tlvs.remove(&virtio_wifi::VIRTIO_WIFI_KEY_DATA).as_deref(),
+                tlvs.remove(&virtio_wifi::VIRTIO_WIFI_KEY_SEQ).as_deref(),
+            )?,
         ];
+        if !tlvs.is_empty() {
+            log::warn!("Unrecognized TLVs: {tlvs:?}");
+        }
         if req.pairwise > 0 {
             attrs.push(attr!(Nl80211Attribute::Mac = mac));
-            attrs.push(attr!(Nl80211Attribute::KeyType = 1_u32));
+            // attrs.push(attr!(Nl80211Attribute::KeyType = 1_u32));
         } else {
-            attrs.push(attr!(Nl80211Attribute::KeyType = 0_u32));
+            // attrs.push(attr!(Nl80211Attribute::KeyType = 0_u32));
             debug_assert_eq!(req.mac, [0; 6], "{mac:?}");
         }
         let attrs = attrs.into_iter().collect::<GenlBuffer<_, _>>();
 
         let recv = self.inner.send(
             self.family_id,
-            NlmF::ACK,
+            NlmF::REQUEST | NlmF::ACK,
             NlPayload::Payload(
                 GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
                     .cmd(Nl80211Command::NewKey)
@@ -2279,14 +2370,12 @@ impl Nl80211Socket {
         let mac = req.mac.as_slice();
         let mut attrs = vec![
             attr!(Nl80211Attribute::IfIndex = iface_index),
-            attr!(Nl80211Attribute::KeyIdx = req.key_index),
+            key_attr_from_req(req, None, None)?,
         ];
 
         if req.pairwise > 0 {
             attrs.push(attr!(Nl80211Attribute::Mac = mac));
-            // attrs.push(attr!(Nl80211Attribute::KeyType = 1_u32));
         } else {
-            //attrs.push(attr!(Nl80211Attribute::KeyType = 0_u32));
             debug_assert_eq!(req.mac, [0; 6], "{mac:?}");
         }
 
@@ -2294,7 +2383,7 @@ impl Nl80211Socket {
 
         let recv = self.inner.send(
             self.family_id,
-            NlmF::ACK,
+            NlmF::REQUEST | NlmF::ACK,
             NlPayload::Payload(
                 GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
                     .cmd(Nl80211Command::DelKey)
@@ -2313,28 +2402,24 @@ impl Nl80211Socket {
         iface_index: u32,
         req: &virtio_wifi::virtio_wifi_key,
     ) -> Result<(), Nl80211Error> {
-        log::debug!("set_key to vif {iface_index}");
-        let mut key_default_types = attr!(Nl80211Attribute::KeyDefaultTypes = Vec::<u8>::new());
-        if req.unicast > 0 {
-            key_default_types =
-                key_default_types.nest(&attr!(Nl80211KeyDefaultTypes::Unicast = ()))?;
-        }
-        if req.multicast > 0 {
-            key_default_types =
-                key_default_types.nest(&attr!(Nl80211KeyDefaultTypes::Multicast = ()))?;
-        }
-        let attrs = vec![
+        log::debug!("set_key to vif {iface_index} {req:?}");
+        let mac = req.mac.as_slice();
+
+        let mut attrs = vec![
             attr!(Nl80211Attribute::IfIndex = iface_index),
-            attr!(Nl80211Attribute::KeyIdx = req.key_index),
-            attr!(Nl80211Attribute::KeyDefault = ()),
-            key_default_types,
-        ]
-        .into_iter()
-        .collect::<GenlBuffer<_, _>>();
+            key_attr_from_req(req, None, None)?,
+        ];
+        if req.pairwise > 0 {
+            attrs.push(attr!(Nl80211Attribute::Mac = mac));
+        } else {
+            debug_assert_eq!(req.mac, [0; 6], "{mac:?}");
+        }
+
+        let attrs = attrs.into_iter().collect::<GenlBuffer<_, _>>();
 
         let recv = self.inner.send(
             self.family_id,
-            NlmF::ACK,
+            NlmF::REQUEST | NlmF::ACK,
             NlPayload::Payload(
                 GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
                     .cmd(Nl80211Command::SetKey)
@@ -2346,6 +2431,44 @@ impl Nl80211Socket {
         let _recv = recv.into_iter().collect::<Result<Vec<NlMessage>, _>>()?;
         // dbg!(&_recv);
         Ok(())
+    }
+
+    pub fn get_key(
+        &self,
+        iface_index: u32,
+        req: &virtio_wifi::virtio_wifi_key,
+    ) -> Result<virtio_wifi::virtio_wifi_key, Nl80211Error> {
+        log::debug!("get_key to vif {iface_index}");
+
+        let attrs = vec![
+            attr!(Nl80211Attribute::IfIndex = iface_index),
+            key_attr_from_req(req, None, None)?,
+        ]
+        .into_iter()
+        .collect::<GenlBuffer<_, _>>();
+
+        let recv = self.inner.send(
+            self.family_id,
+            NlmF::REQUEST | NlmF::ACK,
+            NlPayload::Payload(
+                GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
+                    .cmd(Nl80211Command::GetKey)
+                    .attrs(attrs)
+                    .version(1)
+                    .build()?,
+            ),
+        )?;
+        let recv = recv.into_iter().collect::<Result<Vec<NlMessage>, _>>()?;
+        let mut key: virtio_wifi::virtio_wifi_key = recv
+            .into_iter()
+            .filter(|msg| !matches!(msg.nl_payload(), NlPayload::DumpExtAck(_)))
+            .map(virtio_wifi::virtio_wifi_key::try_from)
+            .next()
+            .unwrap()?;
+        key.hdr.code = virtio_wifi::VIRTIO_WIFI_S_OK.into();
+        key.hdr.index = iface_index.into();
+        // dbg!(&_recv);
+        Ok(key)
     }
 
     pub fn set_station(
@@ -2372,7 +2495,7 @@ impl Nl80211Socket {
 
         let recv = self.inner.send(
             self.family_id,
-            NlmF::ACK,
+            NlmF::REQUEST | NlmF::ACK,
             NlPayload::Payload(
                 GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
                     .cmd(Nl80211Command::SetStation)
@@ -2391,7 +2514,7 @@ impl Nl80211Socket {
         _wiphy: &Wiphy,
         iface_index: u32,
         req: &virtio_wifi::virtio_wifi_authentication_request,
-        ie: &[u8],
+        mut reader: virtio_queue::Reader<'_>,
     ) -> Result<(), Nl80211Error> {
         log::debug!("connect vif {iface_index}");
 
@@ -2399,18 +2522,32 @@ impl Nl80211Socket {
         let ssid = &req.ssid[..u16::from(req.ssid_len).into()];
         let freq = u32::from(req.freq);
         let freq_offset = u32::from(req.freq_offset);
-        let auth_type = u32::from(req.auth_type);
         let privacy = req.privacy > 0;
 
-        // Warning: if ssid is empty, the response cannot be deserialized; there is some
-        // kind of error response that neli cannot parse maybe.
-        let mut attrs = vec![
-            attr!(Nl80211Attribute::IfIndex = iface_index),
-            attr!(Nl80211Attribute::Ssid = ssid),
-            attr!(Nl80211Attribute::AuthType = auth_type),
-        ];
-        if !ie.is_empty() {
+        let mut tlvs: BTreeMap<u32, Vec<u8>> = BTreeMap::default();
+        while let Some((t, v)) = crate::virtio_wifi::read_tlv(&mut reader)? {
+            if tlvs.insert(t, v).is_some() {
+                return Err(Nl80211Error::BadMessage(BadMessageError::DuplicateTLV(t)));
+            }
+        }
+        let mut attrs = vec![attr!(Nl80211Attribute::IfIndex = iface_index)];
+        if let Some(auth_type) = tlvs.remove(&virtio_wifi::VIRTIO_WIFI_AUTH_REQ_AUTH_TYPE) {
+            let Some(auth_type) = Le32::from_slice(&auth_type) else {
+                return Err(Nl80211Error::BadMessage(BadMessageError::InvalidValue(
+                    "VIRTIO_WIFI_BEACON_AUTH_TYPE",
+                    auth_type,
+                )));
+            };
+            attrs.push(attr!(Nl80211Attribute::AuthType = u32::from(*auth_type)));
+        }
+        if !ssid.is_empty() {
+            attrs.push(attr!(Nl80211Attribute::Ssid = ssid));
+        }
+        if let Some(ie) = tlvs.remove(&virtio_wifi::VIRTIO_WIFI_AUTH_REQ_IE) {
             attrs.push(attr!(Nl80211Attribute::Ie = ie));
+        }
+        if !tlvs.is_empty() {
+            log::warn!("Unrecognized TLVs: {tlvs:?}");
         }
         if bssid != [0; 6] {
             attrs.push(attr!(Nl80211Attribute::Mac = bssid));
@@ -2421,6 +2558,7 @@ impl Nl80211Socket {
         }
 
         if privacy {
+            attrs.push(attr!(Nl80211Attribute::Privacy = ()));
             let wpa_versions = u32::from(req.wpa_versions);
             let cipher_group = u32::from(req.cipher_group);
 
@@ -2458,7 +2596,7 @@ impl Nl80211Socket {
 
         let recv = self.inner.send(
             self.family_id,
-            NlmF::ACK,
+            NlmF::REQUEST | NlmF::ACK,
             NlPayload::Payload(
                 GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
                     .cmd(Nl80211Command::Connect)
@@ -2476,7 +2614,7 @@ impl Nl80211Socket {
         &self,
         iface_index: u32,
         req: &virtio_wifi::virtio_wifi_disconnect_request,
-        ie: &[u8],
+        mut reader: virtio_queue::Reader<'_>,
     ) -> Result<(), Nl80211Error> {
         log::debug!("disconnect vif {iface_index} {req:?}");
 
@@ -2492,12 +2630,21 @@ impl Nl80211Socket {
         let reason_code: u16 = req.reason_code.into();
         let local_state_change = req.local_state_change > 0;
 
+        let mut tlvs: BTreeMap<u32, Vec<u8>> = BTreeMap::default();
+        while let Some((t, v)) = crate::virtio_wifi::read_tlv(&mut reader)? {
+            if tlvs.insert(t, v).is_some() {
+                return Err(Nl80211Error::BadMessage(BadMessageError::DuplicateTLV(t)));
+            }
+        }
         let mut attrs = vec![
             attr!(Nl80211Attribute::IfIndex = iface_index),
             attr!(Nl80211Attribute::ReasonCode = reason_code),
         ];
-        if !ie.is_empty() {
+        if let Some(ie) = tlvs.remove(&virtio_wifi::VIRTIO_WIFI_DISCONN_REQ_IE) {
             attrs.push(attr!(Nl80211Attribute::Ie = ie));
+        }
+        if !tlvs.is_empty() {
+            log::warn!("Unrecognized TLVs: {tlvs:?}");
         }
         if mac != [0; 6] {
             attrs.push(attr!(Nl80211Attribute::Mac = mac));
@@ -2510,7 +2657,7 @@ impl Nl80211Socket {
 
         let recv = self.inner.send(
             self.family_id,
-            NlmF::ACK,
+            NlmF::REQUEST | NlmF::ACK,
             NlPayload::Payload(
                 GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
                     .cmd(cmd)
@@ -2566,6 +2713,228 @@ impl Nl80211Socket {
                 log::trace!("{:?}", payload)
             }
         }
+        Ok(())
+    }
+
+    pub fn change_iface(
+        &self,
+        wiphy: &Wiphy,
+        mut iface: virtio_wifi::virtio_wifi_interface,
+    ) -> Result<Interface, Nl80211Error> {
+        let if_index: u32 = iface.index.into();
+        let if_type: u32 = iface.iftype.into();
+        log::trace!("Changing vif {if_index} iftype to {if_type}");
+        let attrs = vec![
+            attr!(Nl80211Attribute::IfIndex = if_index),
+            attr!(Nl80211Attribute::IfType = if_type),
+        ]
+        .into_iter()
+        .collect::<GenlBuffer<_, _>>();
+
+        let recv = self.inner.send(
+            self.family_id,
+            NlmF::REQUEST | NlmF::ACK,
+            NlPayload::Payload(
+                GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
+                    .cmd(Nl80211Command::SetInterface)
+                    .attrs(attrs)
+                    .version(1)
+                    .build()?,
+            ),
+        )?;
+        let _recv = recv.into_iter().collect::<Result<Vec<NlMessage>, _>>()?;
+        // dbg!(&recv);
+
+        let attrs = vec![
+            attr!(Nl80211Attribute::Wiphy = wiphy.index),
+            attr!(Nl80211Attribute::IfIndex = if_index),
+        ]
+        .into_iter()
+        .collect::<GenlBuffer<_, _>>();
+
+        let recv = self.inner.send(
+            self.family_id,
+            NlmF::REQUEST | NlmF::ACK,
+            NlPayload::Payload(
+                GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
+                    .cmd(Nl80211Command::GetInterface)
+                    .attrs(attrs)
+                    .version(1)
+                    .build()?,
+            ),
+        )?;
+        let recv = recv.into_iter().collect::<Result<Vec<NlMessage>, _>>()?;
+        let mut new: Interface = recv
+            .into_iter()
+            .filter(|msg| !matches!(msg.nl_payload(), NlPayload::DumpExtAck(_)))
+            .map(Interface::try_from)
+            .next()
+            .unwrap()?;
+        log::trace!("new iface is {new:?}");
+
+        iface.index = new.index.into();
+        new.response = iface;
+        Ok(new)
+    }
+
+    pub fn get_survey(&mut self, index: u32) -> Result<(), Box<dyn std::error::Error>> {
+        let attrs = vec![NlattrBuilder::default()
+            .nla_type(
+                AttrTypeBuilder::default()
+                    .nla_type(Nl80211Attribute::IfIndex)
+                    .build()
+                    .unwrap(),
+            )
+            .nla_payload(index)
+            .build()
+            .unwrap()]
+        .into_iter()
+        .collect::<GenlBuffer<_, _>>();
+
+        let recv = self
+            .inner
+            .send(
+                self.family_id,
+                NlmF::DUMP | NlmF::ACK,
+                NlPayload::Payload(
+                    GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
+                        .cmd(Nl80211Command::GetSurvey)
+                        .attrs(attrs)
+                        .version(1)
+                        .build()
+                        .unwrap(),
+                ),
+            )
+            .unwrap();
+        let _recv = recv.into_iter().collect::<Result<Vec<NlMessage>, _>>()?;
+        // dbg!(&recv);
+        Ok(())
+    }
+
+    pub fn start_ap(
+        &self,
+        iface_index: u32,
+        req: &virtio_wifi::virtio_wifi_beacon,
+        mut reader: virtio_queue::Reader<'_>,
+    ) -> Result<(), Nl80211Error> {
+        log::info!("Starting AP on iface {iface_index} req: {req:?}");
+        let privacy = req.privacy > 0;
+
+        // Required:
+        // - NL80211_ATTR_BEACON_INTERVAL
+        // - NL80211_ATTR_DTIM_PERIOD
+        // - NL80211_ATTR_BEACON_HEAD
+        let mut attrs = vec![
+            attr!(Nl80211Attribute::IfIndex = iface_index),
+            attr!(Nl80211Attribute::BeaconInterval = u32::from(req.beacon_interval)),
+            attr!(Nl80211Attribute::DtimPeriod = u32::from(req.dtim_period)),
+            attr!(Nl80211Attribute::WiphyFreq = u32::from(req.channel.center_freq)),
+            attr!(
+                Nl80211Attribute::WiphyFreqOffset = u32::from(u16::from(req.channel.freq_offset))
+            ),
+        ];
+
+        if u32::from(req.channel.width) > 0 {
+            attrs.push(attr!(
+                Nl80211Attribute::ChannelWidth = u32::from(req.channel.width)
+            ));
+        }
+        let mut tlvs: BTreeMap<u32, Vec<u8>> = BTreeMap::default();
+        while let Some((t, v)) = crate::virtio_wifi::read_tlv(&mut reader)? {
+            if tlvs.insert(t, v).is_some() {
+                return Err(Nl80211Error::BadMessage(BadMessageError::DuplicateTLV(t)));
+            }
+        }
+        // Optional:
+        // - NL80211_ATTR_SSID
+        // - NL80211_ATTR_HIDDEN_SSID
+        // - NL80211_ATTR_AUTH_TYPE
+        // - NL80211_ATTR_INACTIVITY_TIMEOUT
+        // - NL80211_ATTR_WIPHY_FREQ
+        // - NL80211_ATTR_TX_RATES
+        // - NL80211_ATTR_AP_SETTINGS_FLAGS (?)
+        if let Some(ssid) = tlvs.remove(&virtio_wifi::VIRTIO_WIFI_BEACON_SSID) {
+            attrs.push(attr!(Nl80211Attribute::Ssid = ssid));
+        }
+        if let Some(beacon_head) = tlvs.remove(&virtio_wifi::VIRTIO_WIFI_BEACON_HEAD) {
+            attrs.push(attr!(Nl80211Attribute::BeaconHead = beacon_head));
+        }
+        if let Some(beacon_tail) = tlvs.remove(&virtio_wifi::VIRTIO_WIFI_BEACON_TAIL) {
+            attrs.push(attr!(Nl80211Attribute::BeaconTail = beacon_tail));
+        }
+        if let Some(ie) = tlvs.remove(&virtio_wifi::VIRTIO_WIFI_BEACON_IES) {
+            attrs.push(attr!(Nl80211Attribute::Ie = ie));
+        }
+        if let Some(probe_resp) = tlvs.remove(&virtio_wifi::VIRTIO_WIFI_BEACON_IES_PROBE_RESP) {
+            attrs.push(attr!(Nl80211Attribute::IeProbeResp = probe_resp));
+        }
+        if let Some(assoc_resp) = tlvs.remove(&virtio_wifi::VIRTIO_WIFI_BEACON_IES_ASSOC_RESP) {
+            attrs.push(attr!(Nl80211Attribute::IeAssocResp = assoc_resp));
+        }
+        if let Some(probe_resp) = tlvs.remove(&virtio_wifi::VIRTIO_WIFI_BEACON_PROBE_RESP) {
+            attrs.push(attr!(Nl80211Attribute::ProbeResp = probe_resp));
+        }
+        if let Some(auth_type) = tlvs.remove(&virtio_wifi::VIRTIO_WIFI_BEACON_AUTH_TYPE) {
+            let Some(auth_type) = Le32::from_slice(&auth_type) else {
+                return Err(Nl80211Error::BadMessage(BadMessageError::InvalidValue(
+                    "VIRTIO_WIFI_BEACON_AUTH_TYPE",
+                    auth_type,
+                )));
+            };
+            attrs.push(attr!(Nl80211Attribute::AuthType = u32::from(*auth_type)));
+        }
+        if !tlvs.is_empty() {
+            log::warn!("Unrecognized TLVs: {tlvs:?}");
+        }
+        if privacy {
+            attrs.push(attr!(Nl80211Attribute::Privacy = ()));
+            let wpa_versions = u32::from(req.wpa_versions);
+            let cipher_group = u32::from(req.cipher_group);
+
+            let mut cipher_suites_pairwise = [0_u32; 5];
+            let n_ciphers_pairwise = u32::from(req.n_ciphers_pairwise) as usize;
+            for i in 0..n_ciphers_pairwise {
+                cipher_suites_pairwise[i] = req.ciphers_pairwise[i].into();
+            }
+
+            let mut akm_suites = [0_u32; 10];
+            let n_akm_suites = u32::from(req.n_akm_suites) as usize;
+            for i in 0..n_akm_suites {
+                akm_suites[i] = req.akm_suites[i].into();
+            }
+            if n_akm_suites > 0 {
+                attrs.push(attr!(
+                    Nl80211Attribute::AkmSuites = akm_suites[..n_akm_suites].to_vec()
+                ));
+            }
+            if n_ciphers_pairwise > 0 {
+                attrs.push(attr!(
+                    Nl80211Attribute::CipherSuitesPairwise =
+                        cipher_suites_pairwise[..n_ciphers_pairwise].to_vec()
+                ));
+            }
+            if wpa_versions > 0 {
+                attrs.push(attr!(Nl80211Attribute::WpaVersions = wpa_versions));
+            }
+            if cipher_group > 0 {
+                attrs.push(attr!(Nl80211Attribute::CipherSuiteGroup = cipher_group));
+            }
+        }
+
+        let attrs = attrs.into_iter().collect::<GenlBuffer<_, _>>();
+
+        let recv = self.inner.send(
+            self.family_id,
+            NlmF::REQUEST | NlmF::ACK,
+            NlPayload::Payload(
+                GenlmsghdrBuilder::<Nl80211Command, Nl80211Attribute, NoUserHeader>::default()
+                    .cmd(Nl80211Command::StartAp)
+                    .attrs(attrs)
+                    .version(1)
+                    .build()?,
+            ),
+        )?;
+        let _recv = recv.into_iter().collect::<Result<Vec<NlMessage>, _>>()?;
         Ok(())
     }
 }

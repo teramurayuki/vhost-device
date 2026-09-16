@@ -260,9 +260,9 @@ fn feed_rxq<'a>(buffer: Buffer, rx_frame: RxWork<'a>) -> Result<(), IoError> {
     writer
         .write_obj(virtio_wifi::virtio_wifi_hdr {
             code: if rx_frame.is_802_11 {
-                virtio_wifi::VIRTIO_WIFI_RX_802_11.into()
+                virtio_wifi::VIRTIO_WIFI_802_11.into()
             } else {
-                virtio_wifi::VIRTIO_WIFI_RX_802_3.into()
+                virtio_wifi::VIRTIO_WIFI_802_3.into()
             },
             index: rx_frame.iface.into(),
         })
@@ -366,6 +366,7 @@ impl Default for IoWorkerData {
 
 pub enum StatusCommand {
     UpdateMemory(GuestMemoryAtomic<GuestMemoryMmap>),
+    UpdateNotifier(crate::nl80211::Notifier),
     Exit,
 }
 
@@ -448,6 +449,16 @@ impl IoWorkerData {
     }
 
     #[inline]
+    pub fn update_notifier(
+        &self,
+        sender: &std::sync::mpsc::Sender<StatusCommand>,
+        notifier: crate::nl80211::Notifier,
+    ) {
+        _ = sender.send(StatusCommand::UpdateNotifier(notifier));
+        _ = self.status_event.write(1);
+    }
+
+    #[inline]
     pub fn exit(&self, sender: &std::sync::mpsc::Sender<StatusCommand>) {
         _ = sender.send(StatusCommand::Exit);
         // Called from Drop so must not panic
@@ -469,7 +480,7 @@ impl IoWorkerData {
     pub fn work(
         self,
         status_receiver: std::sync::mpsc::Receiver<StatusCommand>,
-        notifier: crate::nl80211::Notifier,
+        mut notifier: crate::nl80211::Notifier,
     ) {
         use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 
@@ -648,26 +659,6 @@ impl IoWorkerData {
                 self.socket_change_event.read().unwrap();
                 clear_socket_fds = true;
             }
-            if pollfds[status_event_idx].any().unwrap_or_default() {
-                // worker status event
-                let _no_of_updates = self.status_event.read().unwrap();
-                log::debug!("worker status {} event(s)", _no_of_updates);
-                if let Ok(command) = status_receiver.try_recv() {
-                    match command {
-                        StatusCommand::UpdateMemory(new) => {
-                            mem = Some(new);
-                        }
-                        StatusCommand::Exit => {
-                            // Notify mcast thread of exit.
-                            notifier
-                                .exit
-                                .store(true, std::sync::atomic::Ordering::SeqCst);
-                            log::trace!("Worker status event = exit\n\n");
-                            return;
-                        }
-                    }
-                }
-            }
             {
                 // log::debug!("work socket read");
                 // Check each interface socket for Read availability
@@ -740,6 +731,33 @@ impl IoWorkerData {
                         },
                     ) {
                         log::error!("{err}");
+                    }
+                }
+            }
+            if pollfds[status_event_idx].any().unwrap_or_default() {
+                // worker status event
+                let _no_of_updates = self.status_event.read().unwrap();
+                log::debug!("worker status {} event(s)", _no_of_updates);
+                while let Ok(command) = status_receiver.try_recv() {
+                    match command {
+                        StatusCommand::UpdateMemory(new) => {
+                            mem = Some(new);
+                        }
+                        StatusCommand::UpdateNotifier(new) => {
+                            // Notify old mcast thread of exit.
+                            notifier
+                                .exit
+                                .store(true, std::sync::atomic::Ordering::SeqCst);
+                            notifier = new;
+                        }
+                        StatusCommand::Exit => {
+                            // Notify mcast thread of exit.
+                            notifier
+                                .exit
+                                .store(true, std::sync::atomic::Ordering::SeqCst);
+                            log::trace!("Worker status event = exit\n\n");
+                            return;
+                        }
                     }
                 }
             }

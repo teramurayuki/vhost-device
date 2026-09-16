@@ -26,10 +26,11 @@ use virtio_wifi::{
         VIRTIO_WIFI_EVENT_CODE_AUTHENTICATE, VIRTIO_WIFI_EVENT_CODE_AUTHENTICATE_TIMED_OUT,
         VIRTIO_WIFI_EVENT_CODE_CANCEL_SCAN, VIRTIO_WIFI_EVENT_CODE_CONNECT,
         VIRTIO_WIFI_EVENT_CODE_CONNECT_TIMED_OUT, VIRTIO_WIFI_EVENT_CODE_DEAUTHENTICATE,
-        VIRTIO_WIFI_EVENT_CODE_DISASSOCIATE, VIRTIO_WIFI_EVENT_CODE_DISCONNECT,
-        VIRTIO_WIFI_EVENT_CODE_END_SCAN, VIRTIO_WIFI_EVENT_CODE_SCAN_RESULT,
+        VIRTIO_WIFI_EVENT_CODE_DELETE_STATION, VIRTIO_WIFI_EVENT_CODE_DISASSOCIATE,
+        VIRTIO_WIFI_EVENT_CODE_DISCONNECT, VIRTIO_WIFI_EVENT_CODE_END_SCAN,
+        VIRTIO_WIFI_EVENT_CODE_NEW_STATION, VIRTIO_WIFI_EVENT_CODE_SCAN_RESULT,
     },
-    virtio_wifi_scan_result,
+    virtio_wifi_scan_result, virtio_wifi_station_change,
 };
 use vm_memory::ByteValued;
 
@@ -73,91 +74,110 @@ impl McastListener {
             let msg = match msg {
                 Ok(msg) => msg,
                 Err(err) => {
-                    log::error!("{err}");
+                    log::error!("mcast: {err}");
                     break;
                 }
             };
             let NlPayload::Payload(payload) = msg.nl_payload() else {
+                log::error!("mcast: No payload in msg = {msg:?}");
                 continue;
             };
             if self.exit.load(Ordering::SeqCst) {
+                log::warn!("exiting mcast thread");
                 return Ok(());
             }
-            if matches!(payload.cmd(), Nl80211Command::NewScanResults) && *msg.nl_pid() == 0 {
-                let index = payload
-                    .attrs()
-                    .get_attr_handle()
-                    .iter()
-                    .find(|a| matches!(a.nla_type().nla_type(), Nl80211Attribute::IfIndex))
-                    .unwrap()
-                    .get_payload_as::<u32>()
-                    .unwrap();
+            match payload.cmd() {
+                Nl80211Command::NewScanResults if *msg.nl_pid() == 0 => {
+                    let index = payload
+                        .attrs()
+                        .get_attr_handle()
+                        .iter()
+                        .find(|a| matches!(a.nla_type().nla_type(), Nl80211Attribute::IfIndex))
+                        .unwrap()
+                        .get_payload_as::<u32>()
+                        .unwrap();
 
-                self.get_scan(index)?;
-            } else if matches!(payload.cmd(), Nl80211Command::Frame) {
-                let attr_handle = payload.attrs().get_attr_handle();
-                let data = attr_handle
-                    .get_attr_payload_as_with_len::<Vec<u8>>(Nl80211Attribute::Frame)?
-                    .into();
-                let iface = attr_handle.get_attr_payload_as::<u32>(Nl80211Attribute::IfIndex)?;
-                let attr_handles = attr_handle.iter().collect::<Vec<_>>();
-                log::debug!("Nl80211Command::Frame attrs: {:?}", &attr_handles);
-                self.rx_sender
-                    .send(RxWork {
-                        iface,
-                        is_802_11: true,
-                        data,
-                    })
-                    .unwrap();
-                self.rx_event_fd.write(1).unwrap();
-            } else if matches!(payload.cmd(), Nl80211Command::NewInterface) && *msg.nl_pid() == 0 {
-                // Ignore
-                // TODO: send guest NEW_IF event?
-            } else if matches!(payload.cmd(), Nl80211Command::DelInterface) && *msg.nl_pid() == 0 {
-                // Ignore
-                // TODO: send guest DEL_IF event?
-            } else if matches!(payload.cmd(), Nl80211Command::TriggerScan) {
-                // Ignore
-            } else if matches!(payload.cmd(), Nl80211Command::ScanAborted) {
-                let ifindex = payload
-                    .attrs()
-                    .get_attr_handle()
-                    .iter()
-                    .find(|a| matches!(a.nla_type().nla_type(), Nl80211Attribute::IfIndex))
-                    .unwrap()
-                    .get_payload_as::<u32>()
-                    .unwrap();
-                let event = virtio_wifi_event {
-                    code: (VIRTIO_WIFI_EVENT_CODE_CANCEL_SCAN as u32).into(),
-                    ifindex: ifindex.into(),
+                    self.get_scan(index)?;
                 }
-                .as_slice()
-                .to_vec();
-                self.send_event(event);
-            } else if matches!(
-                payload.cmd(),
-                Nl80211Command::NewStation | Nl80211Command::DelStation
-            ) {
-                // Ignore
-                let attr_handle = payload.attrs().get_attr_handle();
-                let attr_handles = attr_handle.iter().collect::<Vec<_>>();
-                log::trace!("DelStation attrs: {:?}", &attr_handles);
-            } else if matches!(payload.cmd(), Nl80211Command::Authenticate) {
-                self.get_authenticate(payload)?;
-            } else if matches!(payload.cmd(), Nl80211Command::Deauthenticate) {
-                self.get_deauthenticate(payload)?;
-            } else if matches!(payload.cmd(), Nl80211Command::Associate) {
-                self.get_associate(payload)?;
-            } else if matches!(payload.cmd(), Nl80211Command::Disassociate) {
-                self.get_disassociate(payload)?;
-            } else if matches!(payload.cmd(), Nl80211Command::Connect) {
-                self.get_connect(payload)?;
-            } else if matches!(payload.cmd(), Nl80211Command::Disconnect) {
-                self.get_disconnect(payload)?;
-            } else {
-                let attr_handle = payload.attrs().get_attr_handle();
-                let attr_handles = attr_handle.iter().collect::<Vec<_>>();
-                log::error!("mcast: {:?} attrs: {:?}", payload.cmd(), &attr_handles);
+                Nl80211Command::Frame => {
+                    log::error!("Nl80211Command::Frame");
+                    let attr_handle = payload.attrs().get_attr_handle();
+                    let data = attr_handle
+                        .get_attr_payload_as_with_len::<Vec<u8>>(Nl80211Attribute::Frame)?
+                        .into();
+                    let iface =
+                        attr_handle.get_attr_payload_as::<u32>(Nl80211Attribute::IfIndex)?;
+                    let attr_handles = attr_handle.iter().collect::<Vec<_>>();
+                    log::error!("Nl80211Command::Frame attrs: {:?}", &attr_handles);
+                    self.rx_sender
+                        .send(RxWork {
+                            iface,
+                            is_802_11: true,
+                            data,
+                        })
+                        .unwrap();
+                    self.rx_event_fd.write(1).unwrap();
+                }
+                Nl80211Command::NewInterface => {
+                    // Ignore
+                    let attr_handle = payload.attrs().get_attr_handle();
+                    let attr_handles = attr_handle.iter().collect::<Vec<_>>();
+                    log::error!("mcast: {:?} attrs: {:?}", payload.cmd(), &attr_handles);
+                    // TODO: send guest NEW_IF event?
+                }
+                Nl80211Command::DelInterface => {
+                    // Ignore
+                    let attr_handle = payload.attrs().get_attr_handle();
+                    let attr_handles = attr_handle.iter().collect::<Vec<_>>();
+                    log::error!("mcast: {:?} attrs: {:?}", payload.cmd(), &attr_handles);
+                    // TODO: send guest DEL_IF event?
+                }
+                Nl80211Command::TriggerScan => {
+                    // Ignore
+                }
+                Nl80211Command::ScanAborted => {
+                    let ifindex = payload
+                        .attrs()
+                        .get_attr_handle()
+                        .iter()
+                        .find(|a| matches!(a.nla_type().nla_type(), Nl80211Attribute::IfIndex))
+                        .unwrap()
+                        .get_payload_as::<u32>()
+                        .unwrap();
+                    let event = virtio_wifi_event {
+                        code: (VIRTIO_WIFI_EVENT_CODE_CANCEL_SCAN as u32).into(),
+                        ifindex: ifindex.into(),
+                    }
+                    .as_slice()
+                    .to_vec();
+                    self.send_event(event);
+                }
+                Nl80211Command::NewStation => {
+                    let attr_handle = payload.attrs().get_attr_handle();
+                    let attr_handles = attr_handle.iter().collect::<Vec<_>>();
+                    log::debug!("NewStation attrs: {:?}", &attr_handles);
+                    self.get_station(payload, true)?;
+                }
+                Nl80211Command::DelStation => {
+                    let attr_handle = payload.attrs().get_attr_handle();
+                    let attr_handles = attr_handle.iter().collect::<Vec<_>>();
+                    log::debug!("DelStation attrs: {:?}", &attr_handles);
+                    self.get_station(payload, false)?;
+                }
+                Nl80211Command::Authenticate => self.get_authenticate(payload)?,
+                Nl80211Command::Deauthenticate => self.get_deauthenticate(payload)?,
+                Nl80211Command::Associate => self.get_associate(payload)?,
+                Nl80211Command::Disassociate => self.get_disassociate(payload)?,
+                Nl80211Command::Connect => self.get_connect(payload)?,
+                Nl80211Command::Disconnect => self.get_disconnect(payload)?,
+                Nl80211Command::StartAp | Nl80211Command::StopAp => {
+                    // Ignore
+                }
+                _other => {
+                    let attr_handle = payload.attrs().get_attr_handle();
+                    let attr_handles = attr_handle.iter().collect::<Vec<_>>();
+                    log::error!("mcast: {:?} attrs: {:?}", payload.cmd(), &attr_handles);
+                }
             }
         }
         Ok(())
@@ -165,8 +185,10 @@ impl McastListener {
 
     #[inline(always)]
     fn send_event(&self, result: Vec<u8>) {
-        self.event_sender.send(result).unwrap();
-        self.event_fd.write(1).unwrap();
+        if self.event_sender.send(result).is_err() {
+            return;
+        }
+        _ = self.event_fd.write(1);
     }
 
     /// Query nl80211 for scan results and send results back to the guest.
@@ -513,6 +535,53 @@ impl McastListener {
             reason_code: reason_code.into(),
             disconnected_by_ap: u8::from(disconnected_by_ap),
             padding: [0; 5],
+            ie_len: ie.as_ref().map(|r| r.len() as u64).unwrap_or(0).into(),
+        }
+        .as_slice()
+        .to_vec();
+        if let Some(ie) = ie {
+            event.extend(&ie);
+        }
+        self.send_event(event);
+        Ok(())
+    }
+
+    /// Send new/delete station event
+    fn get_station(
+        &self,
+        payload: &neli::genl::Genlmsghdr<Nl80211Command, Nl80211Attribute, NoUserHeader>,
+        is_new: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let attr_handle = payload.attrs().get_attr_handle();
+        let ifindex = attr_handle.get_attr_payload_as::<u32>(Nl80211Attribute::IfIndex)?;
+        let mac: [u8; 6usize] = attr_handle
+            .get_attr_payload_as_with_len::<Vec<u8>>(Nl80211Attribute::Mac)?
+            .try_into()
+            .unwrap();
+        let ie = attr_handle
+            .get_attr_payload_as_with_len::<Vec<u8>>(Nl80211Attribute::Ie)
+            .ok();
+        // let _sta_info: Option<Result<Station, _>> = attr_handle
+        //     .get_nested_attributes::<Nl80211StaInfo>(Nl80211Attribute::StaInfo)
+        //     .ok()
+        //     .filter(|a| !a.get_attrs().is_empty())
+        //     .map(|a| a.try_into());
+        log::debug!(
+            "{}_station: ifindex {ifindex:?}, mac {mac:?}, ie {:?} sta_info: {{_sta_info:?}}",
+            if is_new { "new" } else { "del" },
+            ie.as_ref().map(|b| b.len())
+        );
+        let mut event = virtio_wifi_station_change {
+            hdr: virtio_wifi_event {
+                code: if is_new {
+                    (VIRTIO_WIFI_EVENT_CODE_NEW_STATION as u32).into()
+                } else {
+                    (VIRTIO_WIFI_EVENT_CODE_DELETE_STATION as u32).into()
+                },
+                ifindex: ifindex.into(),
+            },
+            mac,
+            padding: [0; 2],
             ie_len: ie.as_ref().map(|r| r.len() as u64).unwrap_or(0).into(),
         }
         .as_slice()
