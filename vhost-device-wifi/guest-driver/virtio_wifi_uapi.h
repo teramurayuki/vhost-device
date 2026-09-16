@@ -6,23 +6,27 @@
 
 #include <linux/virtio_types.h>
 
+#define VIRTIO_WIFI_F_AUTHENTICATE 0
+#define VIRTIO_WIFI_F_CONNECT 1
+#define VIRTIO_WIFI_F_CHANGE_INTERFACE 2
+#define VIRTIO_WIFI_F_START_AP 3
+#define VIRTIO_WIFI_F_REGISTER_FRAME 4
+#define VIRTIO_WIFI_F_AP_SME 5
+
 /*
  * Configuration Space
  */
 struct virtio_wifi_config {
 	__le32 num_of_ifaces;
 	/* TODO: add regulatory domain */
-#define VIRTIO_WIFI_RADIO_F_REG_STRICT (1 << 0)
-#define VIRTIO_WIFI_RADIO_F_P2P_DEVICE (1 << 1)
-#define VIRTIO_WIFI_RADIO_F_USE_CHANCTX (1 << 2)
-#define VIRTIO_WIFI_RADIO_F_MULTI_RADIO (1 << 3)
-#define VIRTIO_WIFI_RADIO_F_DESTROY_ON_CLOSE (1 << 4)
-#define VIRTIO_WIFI_RADIO_F_NO_VIF (1 << 5)
-#define VIRTIO_WIFI_RADIO_F_MLO (1 << 6)
-#define VIRTIO_WIFI_RADIO_F_NAN_DEVICE (1 << 7)
-#define VIRTIO_WIFI_RADIO_F_AUTHENTICATE (1 << 8)
-#define VIRTIO_WIFI_RADIO_F_CONNECT (1 << 9)
-#define VIRTIO_WIFI_RADIO_F_PROBE_CLIENT (1 << 10)
+#define VIRTIO_WIFI_FLAG_AP_SME (1 << 0)
+/* #define VIRTIO_WIFI_FLAG_REG_STRICT (1 << 0) */
+/* #define VIRTIO_WIFI_FLAG_P2P_DEVICE (1 << 1) */
+/* #define VIRTIO_WIFI_FLAG_USE_CHANCTX (1 << 2) */
+/* #define VIRTIO_WIFI_FLAG_MULTI_RADIO (1 << 3) */
+/* #define VIRTIO_WIFI_FLAG_DESTROY_ON_CLOSE (1 << 4) */
+/* #define VIRTIO_WIFI_FLAG_NO_VIF (1 << 5) */
+/* #define VIRTIO_WIFI_FLAG_MLO (1 << 6) */
 	__le32 flags;
 	__le32 iftypes;
 	__le32 available_antennas_tx;
@@ -48,6 +52,7 @@ enum {
 	VIRTIO_WIFI_CMD_INVALID = 0,
 	VIRTIO_WIFI_CMD_GET_INTERFACES,
 	VIRTIO_WIFI_CMD_NEW_INTERFACE,
+	VIRTIO_WIFI_CMD_CHANGE_INTERFACE,
 	VIRTIO_WIFI_CMD_DELETE_INTERFACE,
 	VIRTIO_WIFI_CMD_GET_BAND,
 	VIRTIO_WIFI_CMD_GET_BAND_CHANNEL,
@@ -62,9 +67,13 @@ enum {
 	VIRTIO_WIFI_CMD_DISASSOCIATE,
 	VIRTIO_WIFI_CMD_ADD_KEY,
 	VIRTIO_WIFI_CMD_SET_KEY,
+	VIRTIO_WIFI_CMD_GET_KEY,
 	VIRTIO_WIFI_CMD_DEL_KEY,
 	VIRTIO_WIFI_CMD_SET_STATION,
 	VIRTIO_WIFI_CMD_IF_OPERSTATE,
+	VIRTIO_WIFI_CMD_START_AP,
+	VIRTIO_WIFI_CMD_STOP_AP,
+	VIRTIO_WIFI_CMD_REGISTER_FRAME,
 
 	/* common status codes */
 	VIRTIO_WIFI_S_OK = 0x8000,
@@ -77,16 +86,20 @@ enum {
 };
 
 enum {
-	VIRTIO_WIFI_RX_802_3,
-	VIRTIO_WIFI_RX_802_11,
-	VIRTIO_WIFI_TX_802_3,
-	VIRTIO_WIFI_TX_802_11,
+	VIRTIO_WIFI_802_3,
+	VIRTIO_WIFI_802_11,
 };
 
 /* common header */
 struct virtio_wifi_hdr {
 	__le32 code;
 	__le32 index;
+};
+
+struct virtio_wifi_tlv {
+	__le32 type;
+	__le32 length;
+	__le32 value[];
 };
 
 /* wiphy data */
@@ -327,6 +340,8 @@ enum virtio_wifi_event_code {
 	VIRTIO_WIFI_EVENT_CODE_DISCONNECT,
 	VIRTIO_WIFI_EVENT_CODE_DISASSOCIATE,
 	VIRTIO_WIFI_EVENT_CODE_DEAUTHENTICATE,
+	VIRTIO_WIFI_EVENT_CODE_NEW_STATION,
+	VIRTIO_WIFI_EVENT_CODE_DELETE_STATION,
 };
 
 struct virtio_wifi_event {
@@ -363,15 +378,11 @@ struct virtio_wifi_authentication_request {
 	struct virtio_wifi_event hdr;
 #define ETH_ALEN 6 /* Octets in one ethernet addr	 */
 	__u8 mac[ETH_ALEN];
-	__le16 reserved0;
-	__le32 auth_type;
-	__le32 freq;
-	__le32 freq_offset;
 	__le16 ssid_len;
 #define IEEE80211_MAX_SSID_LEN 32
 	__u8 ssid[IEEE80211_MAX_SSID_LEN];
-	__u8 privacy;
-	__u8 reserved1;
+	__le32 freq;
+	__le32 freq_offset;
 	__le32 wpa_versions;
 	__le32 cipher_group;
 	__le32 n_ciphers_pairwise;
@@ -380,13 +391,17 @@ struct virtio_wifi_authentication_request {
 	__le32 n_akm_suites;
 #define CFG80211_MAX_NUM_AKM_SUITES 10
 	__le32 akm_suites[CFG80211_MAX_NUM_AKM_SUITES];
-	__le32 reserved2;
-	/* ielen: length of the additional IEs */
-	__le64 ielen;
+	__u8 privacy;
+	__u8 padding[3];
 };
 
 static const int _is_padded_____________ =
 	sizeof(struct virtio_wifi_authentication_request) != 0;
+
+enum virtio_wifi_authentication_request_field {
+	VIRTIO_WIFI_AUTH_REQ_AUTH_TYPE = 0,
+	VIRTIO_WIFI_AUTH_REQ_IE,
+};
 
 struct virtio_wifi_association_request {
 	struct virtio_wifi_event hdr;
@@ -406,12 +421,14 @@ struct virtio_wifi_association_request {
 #define CFG80211_MAX_NUM_AKM_SUITES 10
 	__le32 akm_suites[CFG80211_MAX_NUM_AKM_SUITES];
 	__le32 padding0;
-	/* ielen: length of the additional IEs */
-	__le64 ielen;
 };
 
 static const int _is_padded______________ =
 	sizeof(struct virtio_wifi_association_request) != 0;
+
+enum virtio_wifi_association_request_field {
+	VIRTIO_WIFI_ASSOC_REQ_IE = 0,
+};
 
 struct virtio_wifi_association_response {
 	struct virtio_wifi_event hdr;
@@ -423,6 +440,11 @@ struct virtio_wifi_association_response {
 
 static const int _is_padded_______________ =
 	sizeof(struct virtio_wifi_association_response) != 0;
+
+enum virtio_wifi_association_response_field {
+	VIRTIO_WIFI_ASSOC_RESP_FRAME = 0,
+	VIRTIO_WIFI_ASSOC_RESP_IES,
+};
 
 struct virtio_wifi_connection_response {
 	struct virtio_wifi_event hdr;
@@ -436,6 +458,11 @@ struct virtio_wifi_connection_response {
 static const int _is_padded________________ =
 	sizeof(struct virtio_wifi_connection_response) != 0;
 
+enum virtio_wifi_connection_response_field {
+	VIRTIO_WIFI_CONN_RESP_REQ_IE = 0,
+	VIRTIO_WIFI_CONN_RESP_RESP_IE,
+};
+
 struct virtio_wifi_disconnection_response {
 	struct virtio_wifi_event hdr;
 	__le16 reason_code;
@@ -447,24 +474,47 @@ struct virtio_wifi_disconnection_response {
 static const int _is_padded_________________ =
 	sizeof(struct virtio_wifi_disconnection_response) != 0;
 
+enum virtio_wifi_disconnection_response_field {
+	VIRTIO_WIFI_DISCONN_RESP_IE = 0,
+};
+
+struct virtio_wifi_station_change {
+	struct virtio_wifi_event hdr;
+#define ETH_ALEN 6 /* Octets in one ethernet addr	 */
+	__u8 mac[ETH_ALEN];
+	__u8 padding[2];
+	__le64 ie_len;
+};
+
+static const int _is_padded__________________f___ =
+	sizeof(struct virtio_wifi_station_change) != 0;
+
 struct virtio_wifi_key {
 	struct virtio_wifi_hdr hdr;
-	__u8 key_index;
-	__u8 pairwise;
 #define ETH_ALEN 6 /* Octets in one ethernet addr	 */
 	__u8 mac[ETH_ALEN];
 	__le16 vlan_id;
-	__u8 unicast;
-	__u8 multicast;
 	__le32 cipher;
-	__le32 key_len;
-	__le32 seq_len;
 	/* enum nl80211_key_mode */
 	__le32 mode;
+#define VIRTIO_WIFI_KEY_F_DEFAULT_UNI (1 << 0)
+#define VIRTIO_WIFI_KEY_F_DEFAULT_MULTI (1 << 1)
+#define VIRTIO_WIFI_KEY_F_DEFAULT_MGMT (1 << 2)
+#define VIRTIO_WIFI_KEY_F_DEFAULT (1 << 3)
+#define VIRTIO_WIFI_KEY_F_IDX (1 << 4)
+#define VIRTIO_WIFI_KEY_F_TYPE (1 << 5)
+	__le16 flags;
+	__u8 pairwise;
+	__u8 key_index;
 };
 
 static const int _is_padded__________________ =
 	sizeof(struct virtio_wifi_key) != 0;
+
+enum virtio_wifi_key_field {
+	VIRTIO_WIFI_KEY_DATA = 0,
+	VIRTIO_WIFI_KEY_SEQ,
+};
 
 struct virtio_wifi_change_station {
 	struct virtio_wifi_hdr hdr;
@@ -484,13 +534,16 @@ struct virtio_wifi_disconnect_request {
 #define ETH_ALEN 6 /* Octets in one ethernet addr	 */
 	__u8 mac[ETH_ALEN];
 	__le16 reason_code;
-	__le64 ie_len;
 	__u8 local_state_change;
 	__u8 padding[7];
 };
 
 static const int _is_padded____________________ =
 	sizeof(struct virtio_wifi_disconnect_request) != 0;
+
+enum virtio_wifi_disconnect_request_field {
+	VIRTIO_WIFI_DISCONN_REQ_IE = 0,
+};
 
 enum virtio_wifi_if_operstate {
 	VIRTIO_WIFI_IF_OPER_UNKNOWN = 0,
@@ -510,6 +563,53 @@ struct virtio_wifi_set_if_operstate {
 
 static const int _is_padded_____________________ =
 	sizeof(struct virtio_wifi_set_if_operstate) != 0;
+
+// Values used in wpa_driver_nl80211_set_ap()
+struct virtio_wifi_beacon {
+	struct virtio_wifi_hdr hdr;
+	struct virtio_wifi_channel channel;
+	__le32 beacon_interval;
+	__le32 beacon_rate;
+	__le32 wpa_versions;
+	/* enum virtio_wifi_freq_band */
+	__le32 band;
+	__le32 dtim_period;
+	__le32 cipher_group;
+	__le32 n_ciphers_pairwise;
+#define NL80211_MAX_NR_CIPHER_SUITES 5
+	__le32 ciphers_pairwise[NL80211_MAX_NR_CIPHER_SUITES];
+	__le32 n_akm_suites;
+#define CFG80211_MAX_NUM_AKM_SUITES 10
+	__le32 akm_suites[CFG80211_MAX_NUM_AKM_SUITES];
+	__u8 privacy;
+	__u8 padding[3];
+	// pbss?
+	// ftm_responder?
+};
+
+static const int _is_padded_______________________ =
+	sizeof(struct virtio_wifi_beacon) != 0;
+
+enum virtio_wifi_beacon_field {
+	VIRTIO_WIFI_BEACON_HEAD = 0,
+	VIRTIO_WIFI_BEACON_TAIL,
+	VIRTIO_WIFI_BEACON_IES,
+	VIRTIO_WIFI_BEACON_IES_PROBE_RESP,
+	VIRTIO_WIFI_BEACON_IES_ASSOC_RESP,
+	VIRTIO_WIFI_BEACON_PROBE_RESP,
+	VIRTIO_WIFI_BEACON_SSID,
+	VIRTIO_WIFI_BEACON_AUTH_TYPE,
+};
+
+// VIRTIO_WIFI_CMD_REGISTER_FRAME
+struct virtio_wifi_register_frame {
+	struct virtio_wifi_hdr hdr;
+	__le16 ftype;
+	__le16 stype;
+};
+
+static const int _is_padded________________________ =
+	sizeof(struct virtio_wifi_register_frame) != 0;
 
 #pragma GCC diagnostic pop
 

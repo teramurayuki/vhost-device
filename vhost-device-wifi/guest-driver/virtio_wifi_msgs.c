@@ -33,6 +33,28 @@ virtio_wifi_msg_get_resp_errno(struct virtio_wifi_hdr *resp_head)
 	}
 }
 
+#define tlv_size(len_cpu) ((len_cpu) > 0 ? ((len_cpu) + sizeof(__le32) * 2) : 0)
+
+#define append_blob(type_cpu, dest, len_cpu, data)                          \
+	if ((len_cpu) > 0 && ((len_cpu) < U32_MAX)) {                       \
+		printk("%s:%d: writing t=%d, len=%ld cursor=%ld data=%p\n", \
+		       __func__, __LINE__, (type_cpu), (len_cpu), cursor,   \
+		       data);                                               \
+		__le32 type = cpu_to_le32(type_cpu);                        \
+		memcpy(dest + (cursor), (__u8 *)(&type), sizeof(__le32));   \
+		cursor += sizeof(__le32);                                   \
+		__le32 len = cpu_to_le32(len_cpu);                          \
+		memcpy(dest + (cursor), (__u8 *)(&len), sizeof(__le32));    \
+		cursor += sizeof(__le32);                                   \
+		memcpy(dest + (cursor), (__u8 *)(data), (len_cpu));         \
+		cursor += (len_cpu);                                        \
+		printk("%s:%d: t=%d, len=%ld new_cursor=%ld\n", __func__,   \
+		       __LINE__, (type_cpu), (len_cpu), cursor);            \
+	} else if ((len_cpu) >= U32_MAX) {                                  \
+		printk("%s:%d: len=%ld invalid\n", __func__, __LINE__,      \
+		       (len_cpu));                                          \
+	}
+
 /**
  * virtio_wifi_msg_init() - Allocate and initialize requestq message.
  * @virtio_wifi: device data
@@ -506,7 +528,7 @@ finish:
 }
 
 int virtio_wifi_do_tx(struct virtio_wifi_wiphy *wiphy, u32 if_index,
-		      struct sk_buff *skb)
+		      struct sk_buff *skb, bool is_802_3)
 {
 	struct virtio_wifi *dev = wiphy->virtio_wifi;
 	struct virtio_wifi_msg *msg;
@@ -519,9 +541,10 @@ int virtio_wifi_do_tx(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 
 	BUG_ON(!dev || !skb);
 
-	msg = virtio_wifi_msg_init(dev, VIRTIO_WIFI_TX_802_3,
-				   sizeof(struct virtio_wifi_hdr) + skb->len,
-				   sizeof(struct virtio_wifi_hdr));
+	msg = virtio_wifi_msg_init(
+		dev, is_802_3 ? VIRTIO_WIFI_802_3 : VIRTIO_WIFI_802_11,
+		sizeof(struct virtio_wifi_hdr) + skb->len,
+		sizeof(struct virtio_wifi_hdr));
 	if (IS_ERR(msg))
 		return PTR_ERR(msg);
 
@@ -704,6 +727,11 @@ int virtio_wifi_do_auth(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 	struct virtio_wifi_msg *msg;
 	struct virtio_wifi_hdr *hdr;
 	struct virtio_wifi_authentication_request *req;
+	size_t cursor = sizeof(struct virtio_wifi_authentication_request);
+	size_t auth_type_len = auth_req->auth_type ==
+					       NL80211_AUTHTYPE_AUTOMATIC ?
+				       0 :
+				       sizeof(auth_req->auth_type);
 	int ret = 0;
 
 	BUG_ON(!wiphy);
@@ -713,7 +741,7 @@ int virtio_wifi_do_auth(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 	msg = virtio_wifi_msg_init(
 		dev, VIRTIO_WIFI_CMD_AUTHENTICATE,
 		sizeof(struct virtio_wifi_authentication_request) +
-			auth_req->ie_len,
+			tlv_size(auth_type_len) + tlv_size(auth_req->ie_len),
 		sizeof(struct virtio_wifi_hdr));
 	if (IS_ERR(msg))
 		return PTR_ERR(msg);
@@ -721,23 +749,20 @@ int virtio_wifi_do_auth(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 	hdr = msg->req;
 	hdr->index = virtio_cpu_to_le(if_index, hdr->index);
 	req = msg->req;
-	req->auth_type = virtio_cpu_to_le(auth_req->auth_type, req->auth_type);
+	append_blob(VIRTIO_WIFI_AUTH_REQ_AUTH_TYPE, msg->req, auth_type_len,
+		    (void *)&auth_req->auth_type);
 	ether_addr_copy(req->mac, auth_req->bss->bssid);
 	req->freq = virtio_cpu_to_le(auth_req->bss->channel->center_freq,
 				     req->freq);
 	req->freq_offset = virtio_cpu_to_le(auth_req->bss->channel->freq_offset,
 					    req->freq_offset);
-	req->ielen = virtio_cpu_to_le(auth_req->ie_len, req->ielen);
+	append_blob(VIRTIO_WIFI_AUTH_REQ_IE, msg->req, auth_req->ie_len,
+		    auth_req->ie);
 
 	memcpy(req->ssid, ssid_elem->data,
 	       MIN(ssid_elem->datalen, IEEE80211_MAX_SSID_LEN));
 	req->ssid_len = virtio_cpu_to_le(
 		MIN(ssid_elem->datalen, IEEE80211_MAX_SSID_LEN), req->ssid_len);
-	if (auth_req->ie_len > 0) {
-		memcpy(msg->req +
-			       sizeof(struct virtio_wifi_authentication_request),
-		       auth_req->ie, auth_req->ie_len);
-	}
 
 	ret = virtio_wifi_msg_xfer(&dev->controlq, msg, 0);
 	if (ret) {
@@ -757,6 +782,7 @@ int virtio_wifi_do_assoc(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 	struct virtio_wifi_msg *msg;
 	struct virtio_wifi_hdr *hdr;
 	struct virtio_wifi_association_request *req;
+	size_t cursor = sizeof(struct virtio_wifi_association_request);
 	int ret = 0;
 
 	BUG_ON(!wiphy);
@@ -766,7 +792,7 @@ int virtio_wifi_do_assoc(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 	msg = virtio_wifi_msg_init(
 		dev, VIRTIO_WIFI_CMD_ASSOCIATE,
 		sizeof(struct virtio_wifi_association_request) +
-			assoc_req->ie_len,
+			tlv_size(assoc_req->ie_len),
 		sizeof(struct virtio_wifi_hdr));
 	if (IS_ERR(msg))
 		return PTR_ERR(msg);
@@ -775,7 +801,6 @@ int virtio_wifi_do_assoc(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 	hdr->index = virtio_cpu_to_le(if_index, hdr->index);
 	req = msg->req;
 	/* ether_addr_copy(req->mac, assoc_req->bss->bssid); */
-	req->ielen = virtio_cpu_to_le(assoc_req->ie_len, req->ielen);
 	ether_addr_copy(req->mac, assoc_req->bss->bssid);
 	req->freq = virtio_cpu_to_le(assoc_req->bss->channel->center_freq,
 				     req->freq);
@@ -786,11 +811,8 @@ int virtio_wifi_do_assoc(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 	       MIN(ssid_elem->datalen, IEEE80211_MAX_SSID_LEN));
 	req->ssid_len = virtio_cpu_to_le(
 		MIN(ssid_elem->datalen, IEEE80211_MAX_SSID_LEN), req->ssid_len);
-	if (assoc_req->ie_len > 0) {
-		memcpy(msg->req +
-			       sizeof(struct virtio_wifi_association_request),
-		       assoc_req->ie, assoc_req->ie_len);
-	}
+	append_blob(VIRTIO_WIFI_ASSOC_REQ_IE, msg->req, assoc_req->ie_len,
+		    assoc_req->ie);
 	req->wpa_versions = virtio_cpu_to_le(assoc_req->crypto.wpa_versions,
 					     req->wpa_versions);
 	req->cipher_group = virtio_cpu_to_le(assoc_req->crypto.cipher_group,
@@ -822,14 +844,17 @@ int virtio_wifi_do_add_key(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 	struct virtio_wifi_msg *msg;
 	struct virtio_wifi_hdr *hdr;
 	struct virtio_wifi_key *key;
+	size_t cursor = sizeof(struct virtio_wifi_key);
 	int ret = 0;
+	u32 flags = VIRTIO_WIFI_KEY_F_IDX | VIRTIO_WIFI_KEY_F_TYPE;
 
 	BUG_ON(!wiphy);
 
 	dev = wiphy->virtio_wifi;
 	msg = virtio_wifi_msg_init(dev, VIRTIO_WIFI_CMD_ADD_KEY,
 				   sizeof(struct virtio_wifi_key) +
-					   params->key_len + params->seq_len,
+					   tlv_size(params->key_len) +
+					   tlv_size(params->seq_len),
 				   sizeof(struct virtio_wifi_hdr));
 	if (IS_ERR(msg))
 		return PTR_ERR(msg);
@@ -845,12 +870,12 @@ int virtio_wifi_do_add_key(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 	key->vlan_id = virtio_cpu_to_le(params->vlan_id, key->vlan_id);
 	key->cipher = virtio_cpu_to_le(params->cipher, key->cipher);
 	key->mode = virtio_cpu_to_le(params->mode, key->mode);
-	key->key_len = virtio_cpu_to_le(params->key_len, key->key_len);
-	key->seq_len = virtio_cpu_to_le(params->seq_len, key->seq_len);
-	void *key_ptr = msg->req + sizeof(struct virtio_wifi_key);
-	memcpy(key_ptr, params->key, params->key_len);
-	void *seq_ptr = key_ptr + params->key_len;
-	memcpy(seq_ptr, params->seq, params->seq_len);
+	key->flags = virtio_cpu_to_le(flags, key->flags);
+
+	append_blob(VIRTIO_WIFI_KEY_DATA, msg->req, (size_t)params->key_len,
+		    params->key);
+	append_blob(VIRTIO_WIFI_KEY_SEQ, msg->req, (size_t)params->seq_len,
+		    params->seq);
 
 	ret = virtio_wifi_msg_xfer(&dev->controlq, msg, 0);
 	if (ret) {
@@ -870,6 +895,7 @@ int virtio_wifi_do_del_key(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 	struct virtio_wifi_hdr *hdr;
 	struct virtio_wifi_key *key;
 	int ret = 0;
+	u32 flags = VIRTIO_WIFI_KEY_F_IDX | VIRTIO_WIFI_KEY_F_TYPE;
 
 	BUG_ON(!wiphy);
 
@@ -888,6 +914,7 @@ int virtio_wifi_do_del_key(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 	key->pairwise = pairwise;
 	if (pairwise && mac_addr)
 		ether_addr_copy(key->mac, mac_addr);
+	key->flags = virtio_cpu_to_le(flags, key->flags);
 
 	ret = virtio_wifi_msg_xfer(&dev->controlq, msg, 0);
 	if (ret) {
@@ -900,14 +927,15 @@ finish:
 }
 
 int virtio_wifi_do_set_default_key(struct virtio_wifi_wiphy *wiphy,
-				   u32 if_index, u8 key_index, bool unicast,
-				   bool multicast)
+				   u32 if_index, u8 key_index, bool def,
+				   bool unicast, bool multicast, bool mgmt)
 {
 	struct virtio_wifi *dev;
 	struct virtio_wifi_msg *msg;
 	struct virtio_wifi_hdr *hdr;
 	struct virtio_wifi_key *key;
 	int ret = 0;
+	u32 flags = VIRTIO_WIFI_KEY_F_IDX;
 
 	BUG_ON(!wiphy);
 
@@ -923,8 +951,16 @@ int virtio_wifi_do_set_default_key(struct virtio_wifi_wiphy *wiphy,
 
 	key = msg->req;
 	key->key_index = key_index;
-	key->unicast = unicast;
-	key->multicast = multicast;
+
+	if (def)
+		flags |= VIRTIO_WIFI_KEY_F_DEFAULT;
+	if (unicast)
+		flags |= VIRTIO_WIFI_KEY_F_DEFAULT_UNI;
+	if (multicast)
+		flags |= VIRTIO_WIFI_KEY_F_DEFAULT_MULTI;
+	if (mgmt)
+		flags |= VIRTIO_WIFI_KEY_F_DEFAULT_MGMT;
+	key->flags = virtio_cpu_to_le(flags, key->flags);
 
 	ret = virtio_wifi_msg_xfer(&dev->controlq, msg, 0);
 	if (ret) {
@@ -935,6 +971,53 @@ finish:
 	virtio_wifi_msg_release(msg);
 	return ret;
 }
+
+int virtio_wifi_do_get_key(struct virtio_wifi_wiphy *wiphy, u32 if_index,
+			   u8 key_index, bool pairwise, const u8 *mac_addr,
+			   struct key_params *params)
+{
+	struct virtio_wifi *dev;
+	struct virtio_wifi_msg *msg;
+	struct virtio_wifi_hdr *hdr;
+	struct virtio_wifi_key *key;
+	int ret = 0;
+	u32 flags = VIRTIO_WIFI_KEY_F_IDX | VIRTIO_WIFI_KEY_F_TYPE;
+
+	BUG_ON(!wiphy);
+
+	dev = wiphy->virtio_wifi;
+	msg = virtio_wifi_msg_init(dev, VIRTIO_WIFI_CMD_GET_KEY,
+				   sizeof(struct virtio_wifi_key),
+				   sizeof(struct virtio_wifi_key));
+	if (IS_ERR(msg))
+		return PTR_ERR(msg);
+
+	hdr = msg->req;
+	hdr->index = virtio_cpu_to_le(if_index, hdr->index);
+
+	key = msg->req;
+	key->key_index = key_index;
+	key->pairwise = pairwise;
+	key->flags = virtio_cpu_to_le(flags, key->flags);
+
+	if (mac_addr)
+		ether_addr_copy(key->mac, mac_addr);
+
+	ret = virtio_wifi_msg_xfer(&dev->controlq, msg, 0);
+	if (ret) {
+		goto finish;
+	}
+	key = msg->resp;
+
+	params->vlan_id = virtio_le_to_cpu(key->vlan_id);
+	params->cipher = virtio_le_to_cpu(key->cipher);
+	params->mode = virtio_le_to_cpu(key->mode);
+
+finish:
+	virtio_wifi_msg_release(msg);
+	return ret;
+}
+
 int virtio_wifi_do_change_station(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 				  const u8 *mac,
 				  struct station_parameters *params)
@@ -980,6 +1063,10 @@ int virtio_wifi_do_connect(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 	struct virtio_wifi_msg *msg;
 	struct virtio_wifi_hdr *hdr;
 	struct virtio_wifi_authentication_request *req;
+	size_t cursor = sizeof(struct virtio_wifi_authentication_request);
+	size_t auth_type_len = sme->auth_type == NL80211_AUTHTYPE_AUTOMATIC ?
+				       0 :
+				       sizeof(sme->auth_type);
 	int ret = 0;
 
 	BUG_ON(!wiphy);
@@ -988,7 +1075,8 @@ int virtio_wifi_do_connect(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 
 	msg = virtio_wifi_msg_init(
 		dev, VIRTIO_WIFI_CMD_CONNECT,
-		sizeof(struct virtio_wifi_authentication_request) + sme->ie_len,
+		sizeof(struct virtio_wifi_authentication_request) +
+			tlv_size(auth_type_len) + tlv_size(sme->ie_len),
 		sizeof(struct virtio_wifi_hdr));
 	if (IS_ERR(msg))
 		return PTR_ERR(msg);
@@ -996,7 +1084,8 @@ int virtio_wifi_do_connect(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 	hdr = msg->req;
 	hdr->index = virtio_cpu_to_le(if_index, hdr->index);
 	req = msg->req;
-	req->auth_type = virtio_cpu_to_le(sme->auth_type, req->auth_type);
+	append_blob(VIRTIO_WIFI_AUTH_REQ_AUTH_TYPE, msg->req, auth_type_len,
+		    (void *)&sme->auth_type);
 	if (sme->bssid) {
 		ether_addr_copy(req->mac, sme->bssid);
 	} else if (sme->bssid_hint) {
@@ -1008,12 +1097,7 @@ int virtio_wifi_do_connect(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 		req->freq_offset = virtio_cpu_to_le(sme->channel->freq_offset,
 						    req->freq_offset);
 	}
-	req->ielen = virtio_cpu_to_le(sme->ie_len, req->ielen);
-	if (sme->ie_len > 0) {
-		memcpy(msg->req +
-			       sizeof(struct virtio_wifi_authentication_request),
-		       sme->ie, sme->ie_len);
-	}
+	append_blob(VIRTIO_WIFI_AUTH_REQ_IE, msg->req, sme->ie_len, sme->ie);
 
 	memcpy(req->ssid, sme->ssid,
 	       MIN(sme->ssid_len, IEEE80211_MAX_SSID_LEN));
@@ -1053,6 +1137,7 @@ int virtio_wifi_do_disconnect(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 	struct virtio_wifi_msg *msg;
 	struct virtio_wifi_hdr *hdr;
 	struct virtio_wifi_disconnect_request *req;
+	size_t cursor = sizeof(struct virtio_wifi_disconnect_request);
 	int ret = 0;
 
 	BUG_ON(!wiphy || !(cmd == VIRTIO_WIFI_CMD_DEAUTHENTICATE ||
@@ -1062,7 +1147,8 @@ int virtio_wifi_do_disconnect(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 
 	msg = virtio_wifi_msg_init(
 		dev, cmd,
-		sizeof(struct virtio_wifi_disconnect_request) + ie_len,
+		sizeof(struct virtio_wifi_disconnect_request) +
+			tlv_size(ie_len),
 		sizeof(struct virtio_wifi_hdr));
 	if (IS_ERR(msg))
 		return PTR_ERR(msg);
@@ -1076,11 +1162,7 @@ int virtio_wifi_do_disconnect(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 		ether_addr_copy(req->mac, mac);
 	}
 
-	if (ie && ie_len > 0) {
-		req->ie_len = virtio_cpu_to_le(ie_len, req->ie_len);
-		memcpy(msg->req + sizeof(struct virtio_wifi_disconnect_request),
-		       ie, ie_len);
-	}
+	append_blob(VIRTIO_WIFI_DISCONN_REQ_IE, msg->req, ie_len, ie);
 
 	ret = virtio_wifi_msg_xfer(&dev->controlq, msg, 0);
 	if (ret) {
@@ -1125,6 +1207,127 @@ int virtio_wifi_do_if_oper(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 	}
 
 finish:
+	virtio_wifi_msg_release(msg);
+	return ret;
+}
+
+int virtio_wifi_do_change_interface(struct virtio_wifi *dev, u32 if_index,
+				    enum nl80211_iftype type)
+{
+	struct virtio_wifi_msg *msg;
+	struct virtio_wifi_interface *ifreq;
+	int ret = 0;
+
+	BUG_ON(!dev);
+
+	printk("%s: removing interface %u to wiphy\n", __func__, if_index);
+
+	msg = virtio_wifi_msg_init(dev, VIRTIO_WIFI_CMD_CHANGE_INTERFACE,
+				   sizeof(struct virtio_wifi_interface),
+				   sizeof(struct virtio_wifi_hdr));
+	if (IS_ERR(msg))
+		return PTR_ERR(msg);
+
+	ifreq = msg->req;
+
+	ifreq->iftype = virtio_cpu_to_le(type, ifreq->iftype);
+	ifreq->index = virtio_cpu_to_le(if_index, ifreq->index);
+
+	ret = virtio_wifi_msg_xfer(&dev->controlq, msg, 0);
+	if (ret) {
+		goto finish;
+	}
+
+	printk("%s: wiphy changed vif %u to mode %d\n", __func__, if_index,
+	       type);
+finish:
+	virtio_wifi_msg_release(msg);
+	return ret;
+}
+
+int virtio_wifi_do_start_ap(struct virtio_wifi *dev, u32 if_index,
+			    struct cfg80211_ap_settings *settings)
+{
+	struct virtio_wifi_msg *msg;
+	struct virtio_wifi_beacon *req;
+	struct cfg80211_beacon_data *beacon = &settings->beacon;
+	size_t cursor = sizeof(struct virtio_wifi_beacon);
+	int ret = 0;
+	size_t auth_type_len = settings->auth_type ==
+					       NL80211_AUTHTYPE_AUTOMATIC ?
+				       0 :
+				       sizeof(settings->auth_type);
+
+	BUG_ON(!dev);
+
+	printk("%s: start ap %u\n", __func__, if_index);
+
+	msg = virtio_wifi_msg_init(
+		dev, VIRTIO_WIFI_CMD_START_AP,
+		sizeof(struct virtio_wifi_beacon) + tlv_size(auth_type_len) +
+			tlv_size(settings->ssid_len) +
+			tlv_size(settings->beacon.head_len) +
+			tlv_size(settings->beacon.tail_len) +
+			tlv_size(settings->beacon.beacon_ies_len) +
+			tlv_size(settings->beacon.proberesp_ies_len) +
+			tlv_size(settings->beacon.assocresp_ies_len),
+		sizeof(struct virtio_wifi_hdr));
+	if (IS_ERR(msg))
+		return PTR_ERR(msg);
+
+	req = msg->req;
+
+	req->hdr.index = virtio_cpu_to_le(if_index, req->hdr.index);
+	req->channel.center_freq = virtio_cpu_to_le(
+		settings->chandef.chan->center_freq, req->channel.center_freq);
+	req->channel.freq_offset = virtio_cpu_to_le(
+		settings->chandef.chan->freq_offset, req->channel.freq_offset);
+	/* req->channel.band = virtio_cpu_to_le(settings->chandef.chan->band, */
+	/* 				    req->channel.band); */
+	req->channel.width =
+		virtio_cpu_to_le(settings->chandef.width, req->channel.width);
+	req->beacon_interval = virtio_cpu_to_le(settings->beacon_interval,
+						req->beacon_interval);
+
+	/* req->beacon_rate = virtio_cpu_to_le(settings->beacon_rate, req->beacon_rate); */
+	req->wpa_versions = virtio_cpu_to_le(settings->crypto.wpa_versions,
+					     req->wpa_versions);
+	req->privacy = virtio_cpu_to_le(settings->privacy, req->privacy);
+	req->dtim_period =
+		virtio_cpu_to_le(settings->dtim_period, req->dtim_period);
+
+	/* req->inactivity_timeout = virtio_cpu_to_le(settings->inactivity_timeout, req->inactivity_timeout); */
+	req->cipher_group = virtio_cpu_to_le(settings->crypto.cipher_group,
+					     req->cipher_group);
+	req->n_akm_suites = virtio_cpu_to_le(settings->crypto.n_akm_suites,
+					     req->n_akm_suites);
+	memcpy(req->akm_suites, settings->crypto.akm_suites,
+	       sizeof(u32) * settings->crypto.n_akm_suites);
+	req->n_ciphers_pairwise = virtio_cpu_to_le(
+		settings->crypto.n_ciphers_pairwise, req->n_ciphers_pairwise);
+	memcpy(req->ciphers_pairwise, settings->crypto.ciphers_pairwise,
+	       sizeof(u32) * settings->crypto.n_ciphers_pairwise);
+
+	append_blob(VIRTIO_WIFI_BEACON_HEAD, msg->req, beacon->head_len,
+		    beacon->head);
+	append_blob(VIRTIO_WIFI_BEACON_TAIL, msg->req, beacon->tail_len,
+		    beacon->tail);
+	append_blob(VIRTIO_WIFI_BEACON_IES, msg->req, beacon->beacon_ies_len,
+		    beacon->beacon_ies);
+	append_blob(VIRTIO_WIFI_BEACON_IES_PROBE_RESP, msg->req,
+		    beacon->proberesp_ies_len, beacon->proberesp_ies);
+	append_blob(VIRTIO_WIFI_BEACON_IES_ASSOC_RESP, msg->req,
+		    beacon->assocresp_ies_len, beacon->assocresp_ies);
+	append_blob(VIRTIO_WIFI_BEACON_PROBE_RESP, msg->req,
+		    beacon->probe_resp_len, beacon->probe_resp);
+	append_blob(VIRTIO_WIFI_BEACON_SSID, msg->req, settings->ssid_len,
+		    settings->ssid);
+	if (auth_type_len > 0) {
+		append_blob(VIRTIO_WIFI_BEACON_AUTH_TYPE, msg->req,
+			    auth_type_len, (void *)&settings->auth_type);
+	}
+
+	ret = virtio_wifi_msg_xfer(&dev->controlq, msg, 0);
 	virtio_wifi_msg_release(msg);
 	return ret;
 }

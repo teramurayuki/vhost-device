@@ -58,3 +58,10 @@ wireshark netlink.pcap # look at the results with wireshark
 ip addr add 192.168.1.153/24 dev wlan0
 ip route add default via 192.168.1.1 dev wlan0
 ```
+
+
+```
+/usr/sbin/hostapd -B -P /run/hostapd.pid /etc/hostapd/hostapd.conf
+wpa_cli -i wlan0 log_level debug
+journalctl  -f -u wpa_supplicant -u NetworkManager -u systemd-networkd
+```

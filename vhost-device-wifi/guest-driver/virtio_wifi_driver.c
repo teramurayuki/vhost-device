@@ -165,7 +165,7 @@ void virtio_wifi_do_tx_work(struct work_struct *work)
 	wiphy->tx_if = 0;
 
 	BUG_ON(skb == NULL);
-	int ret = virtio_wifi_do_tx(wiphy, if_index, skb);
+	int ret = virtio_wifi_do_tx(wiphy, if_index, skb, true);
 	if (ret) {
 		dev_kfree_skb(skb);
 		printk("%s do_tx returned %d\n", __func__, ret);
@@ -321,36 +321,6 @@ process_bufs:
 	}
 }
 
-static void virtio_wifi_process_rx_buf(struct virtio_wifi *virtio_wifi,
-				       void *data, int len)
-{
-	struct virtio_wifi_hdr *hdr = data;
-	struct sk_buff *skb = NULL;
-	int frame_data_len;
-	void *frame_data;
-	u32 ifindex = virtio_le_to_cpu(hdr->index);
-
-	/* printk("%s for iface = %u\n", __func__, index); */
-	frame_data_len = len - sizeof(struct virtio_wifi_hdr);
-	frame_data = data + sizeof(struct virtio_wifi_hdr);
-
-	/* Allocate new skb here */
-	skb = alloc_skb(frame_data_len, GFP_KERNEL);
-	if (skb == NULL) {
-		printk("%s alloc_skb frame_data_len = %d failed\n", __func__,
-		       frame_data_len);
-		return;
-	}
-
-	/* Copy the data */
-	skb_put_data(skb, frame_data, frame_data_len);
-	/* receive */
-	if (likely(virtio_wifi->wiphy))
-		virtio_wifi_cfg80211_rx(virtio_wifi->wiphy, ifindex, skb);
-
-	return;
-}
-
 /**
  * rxq_callback: Callback for the RX queue.
  * @queue: rx virtqueue.
@@ -376,7 +346,7 @@ process_bufs:
 	while ((token = virtqueue_get_buf(rxq->vq, &len))) {
 		/* printk("%s got RX buf %u bytes\n", __func__, len); */
 		if (len >= sizeof(struct virtio_wifi_hdr)) {
-			virtio_wifi_process_rx_buf(virtio_wifi, token, len);
+			virtio_wifi_cfg80211_rx(virtio_wifi->wiphy, token, len);
 		} else {
 			printk("%s got RX buf %u bytes < sizeof(struct virtio_wifi_hdr)\n",
 			       __func__, len);
@@ -679,7 +649,14 @@ static struct virtio_device_id id_table[] = {
 	{ 0 },
 };
 
-static unsigned int features[] = {};
+static unsigned int features[] = {
+	VIRTIO_WIFI_F_AUTHENTICATE,
+	VIRTIO_WIFI_F_CONNECT,
+	VIRTIO_WIFI_F_CHANGE_INTERFACE,
+	VIRTIO_WIFI_F_START_AP,
+	VIRTIO_WIFI_F_REGISTER_FRAME,
+	VIRTIO_WIFI_F_AP_SME,
+};
 
 static struct virtio_driver virtio_wifi_driver = {
 	.feature_table = features,

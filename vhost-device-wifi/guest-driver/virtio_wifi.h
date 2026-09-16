@@ -126,8 +126,10 @@ int virtio_wifi_do_add_interface(struct virtio_wifi *dev,
 				 enum nl80211_iftype type,
 				 struct virtio_wifi_interface *retval);
 int virtio_wifi_do_remove_interface(struct virtio_wifi *dev, u32 if_index);
+int virtio_wifi_do_change_interface(struct virtio_wifi *dev, u32 if_index,
+				    enum nl80211_iftype type);
 int virtio_wifi_do_tx(struct virtio_wifi_wiphy *wiphy, u32 if_index,
-		      struct sk_buff *skb);
+		      struct sk_buff *skb, bool is_802_3);
 int virtio_wifi_do_trigger_scan(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 				struct cfg80211_scan_request *req);
 int virtio_wifi_do_auth(struct virtio_wifi_wiphy *wiphy, u32 if_index,
@@ -143,8 +145,11 @@ int virtio_wifi_do_add_key(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 int virtio_wifi_do_del_key(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 			   u8 key_index, bool pairwise, const u8 *mac_addr);
 int virtio_wifi_do_set_default_key(struct virtio_wifi_wiphy *wiphy,
-				   u32 if_index, u8 key_index, bool unicast,
-				   bool multicast);
+				   u32 if_index, u8 key_index, bool def,
+				   bool unicast, bool multicast, bool mgmt);
+int virtio_wifi_do_get_key(struct virtio_wifi_wiphy *wiphy, u32 if_index,
+			   u8 key_index, bool pairwise, const u8 *mac_addr,
+			   struct key_params *params);
 int virtio_wifi_do_change_station(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 				  const u8 *mac,
 				  struct station_parameters *params);
@@ -156,6 +161,9 @@ int virtio_wifi_do_disconnect(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 			      bool local_state_change);
 int virtio_wifi_do_if_oper(struct virtio_wifi_wiphy *wiphy, u32 if_index,
 			   enum virtio_wifi_if_operstate flag, bool value);
+int virtio_wifi_do_start_ap(struct virtio_wifi *dev, u32 if_index,
+			    struct cfg80211_ap_settings *settings);
+
 /*FIXME:remove*/
 static inline const char *cmd_to_s(u32 cmd)
 {
@@ -164,6 +172,8 @@ static inline const char *cmd_to_s(u32 cmd)
 		return "VIRTIO_WIFI_CMD_GET_INTERFACES";
 	case VIRTIO_WIFI_CMD_NEW_INTERFACE:
 		return "VIRTIO_WIFI_CMD_NEW_INTERFACE";
+	case VIRTIO_WIFI_CMD_CHANGE_INTERFACE:
+		return "VIRTIO_WIFI_CMD_CHANGE_INTERFACE";
 	case VIRTIO_WIFI_CMD_DELETE_INTERFACE:
 		return "VIRTIO_WIFI_CMD_DELETE_INTERFACE";
 	case VIRTIO_WIFI_CMD_GET_BAND:
@@ -188,6 +198,8 @@ static inline const char *cmd_to_s(u32 cmd)
 		return "VIRTIO_WIFI_CMD_SET_KEY";
 	case VIRTIO_WIFI_CMD_SET_STATION:
 		return "VIRTIO_WIFI_CMD_SET_STATION";
+	case VIRTIO_WIFI_CMD_START_AP:
+		return "VIRTIO_WIFI_CMD_START_AP";
 	case VIRTIO_WIFI_S_OK:
 		return "VIRTIO_WIFI_S_OK";
 	case VIRTIO_WIFI_S_BAD_MSG:
@@ -217,6 +229,5 @@ void virtio_wifi_cfg80211_scan_done(struct wiphy *wiphy);
 void virtio_wifi_cfg80211_cancel_scan(struct wiphy *wiphy);
 void virtio_wifi_cfg80211_event_dispatch(struct virtio_wifi_wiphy *w, u32 code,
 					 u32 ifindex, void *data, int len);
-void virtio_wifi_cfg80211_rx(struct virtio_wifi_wiphy *w, u32 ifindex,
-			     struct sk_buff *skb);
+void virtio_wifi_cfg80211_rx(struct virtio_wifi_wiphy *w, void *data, int len);
 #endif // __VIRTIO_WIFI_H

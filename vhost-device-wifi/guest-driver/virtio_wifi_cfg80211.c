@@ -16,6 +16,11 @@ static const struct net_device_ops virtio_wifi_netdev_ops;
 static struct virtio_wifi *common_virtio_wifi;
 static void virtio_wifi_cfg80211_net_device_destructor(struct net_device *dev);
 
+static inline bool supported_iftype(enum nl80211_iftype type)
+{
+	return type == NL80211_IFTYPE_STATION || type == NL80211_IFTYPE_AP;
+}
+
 struct virtio_wifi_vif {
 	struct list_head list;
 	u32 index;
@@ -30,13 +35,105 @@ struct virtio_wifi_vif {
 	u32 tx_failed;
 	u8 connect_requested_bss[ETH_ALEN];
 	struct cfg80211_bss *associated_bss;
+	u16 mgmt_rx_reg;
 };
 
-void virtio_wifi_cfg80211_rx(struct virtio_wifi_wiphy *w, u32 ifindex,
-			     struct sk_buff *skb)
+static const struct ieee80211_txrx_stypes
+virtio_wifi_mgmt_stypes[NUM_NL80211_IFTYPES] = {
+	[NL80211_IFTYPE_ADHOC] = {
+		.tx = 0xffff,
+		.rx = BIT(IEEE80211_STYPE_ACTION >> 4) |
+			BIT(IEEE80211_STYPE_AUTH >> 4) |
+			BIT(IEEE80211_STYPE_DEAUTH >> 4) |
+			BIT(IEEE80211_STYPE_PROBE_REQ >> 4),
+	},
+	[NL80211_IFTYPE_STATION] = {
+		.tx = 0xffff,
+		/*
+		 * To support Pre Association Security Negotiation (PASN) while
+		 * already associated to one AP, allow user space to register to
+		 * Rx authentication frames, so that the user space logic would
+		 * be able to receive/handle authentication frames from a
+		 * different AP as part of PASN.
+		 * It is expected that user space would intelligently register
+		 * for Rx authentication frames, i.e., only when PASN is used
+		 * and configure a match filter only for PASN authentication
+		 * algorithm, as otherwise the MLME functionality of mac80211
+		 * would be broken.
+		 */
+		.rx = BIT(IEEE80211_STYPE_ACTION >> 4) |
+			BIT(IEEE80211_STYPE_AUTH >> 4) |
+			BIT(IEEE80211_STYPE_PROBE_REQ >> 4),
+	},
+	[NL80211_IFTYPE_AP] = {
+		.tx = 0xffff,
+		.rx = BIT(IEEE80211_STYPE_ASSOC_REQ >> 4) |
+			BIT(IEEE80211_STYPE_REASSOC_REQ >> 4) |
+			BIT(IEEE80211_STYPE_PROBE_REQ >> 4) |
+			BIT(IEEE80211_STYPE_DISASSOC >> 4) |
+			BIT(IEEE80211_STYPE_AUTH >> 4) |
+			BIT(IEEE80211_STYPE_DEAUTH >> 4) |
+			BIT(IEEE80211_STYPE_ACTION >> 4),
+	},
+	[NL80211_IFTYPE_AP_VLAN] = {
+		/* copy AP */
+		.tx = 0xffff,
+		.rx = BIT(IEEE80211_STYPE_ASSOC_REQ >> 4) |
+			BIT(IEEE80211_STYPE_REASSOC_REQ >> 4) |
+			BIT(IEEE80211_STYPE_PROBE_REQ >> 4) |
+			BIT(IEEE80211_STYPE_DISASSOC >> 4) |
+			BIT(IEEE80211_STYPE_AUTH >> 4) |
+			BIT(IEEE80211_STYPE_DEAUTH >> 4) |
+			BIT(IEEE80211_STYPE_ACTION >> 4),
+	},
+	[NL80211_IFTYPE_P2P_CLIENT] = {
+		.tx = 0xffff,
+		.rx = BIT(IEEE80211_STYPE_ACTION >> 4) |
+			BIT(IEEE80211_STYPE_PROBE_REQ >> 4),
+	},
+	[NL80211_IFTYPE_P2P_GO] = {
+		.tx = 0xffff,
+		.rx = BIT(IEEE80211_STYPE_ASSOC_REQ >> 4) |
+			BIT(IEEE80211_STYPE_REASSOC_REQ >> 4) |
+			BIT(IEEE80211_STYPE_PROBE_REQ >> 4) |
+			BIT(IEEE80211_STYPE_DISASSOC >> 4) |
+			BIT(IEEE80211_STYPE_AUTH >> 4) |
+			BIT(IEEE80211_STYPE_DEAUTH >> 4) |
+			BIT(IEEE80211_STYPE_ACTION >> 4),
+	},
+	[NL80211_IFTYPE_MESH_POINT] = {
+		.tx = 0xffff,
+		.rx = BIT(IEEE80211_STYPE_ACTION >> 4) |
+			BIT(IEEE80211_STYPE_AUTH >> 4) |
+			BIT(IEEE80211_STYPE_DEAUTH >> 4),
+	},
+	[NL80211_IFTYPE_P2P_DEVICE] = {
+		.tx = 0xffff,
+		/*
+		 * To support P2P PASN pairing let user space register to rx
+		 * also AUTH frames on P2P device interface.
+		 */
+		.rx = BIT(IEEE80211_STYPE_ACTION >> 4) |
+			BIT(IEEE80211_STYPE_PROBE_REQ >> 4) |
+			BIT(IEEE80211_STYPE_AUTH >> 4),
+	},
+	[NL80211_IFTYPE_NAN] = {
+		.tx = 0xffff,
+		.rx = BIT(IEEE80211_STYPE_ACTION >> 4) |
+			BIT(IEEE80211_STYPE_AUTH >> 4),
+	},
+};
+void virtio_wifi_cfg80211_rx(struct virtio_wifi_wiphy *w, void *data, int len)
+
 {
 	struct wireless_dev *tmp;
 	struct virtio_wifi_vif *vif;
+	struct virtio_wifi_hdr *hdr = data;
+	struct sk_buff *skb = NULL;
+	int frame_data_len;
+	void *frame_data;
+	u32 ifindex = virtio_le_to_cpu(hdr->index);
+
 	wiphy_lock(w->wiphy);
 	rcu_read_lock();
 	list_for_each_entry_rcu(tmp, &w->wiphy->wdev_list, list) {
@@ -54,6 +151,30 @@ void virtio_wifi_cfg80211_rx(struct virtio_wifi_wiphy *w, u32 ifindex,
 		WARN_ON(vif == NULL);
 		return;
 	}
+
+	/* printk("%s for iface = %u\n", __func__, index); */
+	frame_data_len = len - sizeof(struct virtio_wifi_hdr);
+	frame_data = data + sizeof(struct virtio_wifi_hdr);
+
+	if (hdr->code == VIRTIO_WIFI_802_11) {
+		printk("%s: received VIRTIO_WIFI_802_11\n", __func__);
+		cfg80211_rx_mgmt(&vif->wdev,
+				 vif->associated_bss->channel->center_freq, 0,
+				 (u8 *)frame_data, frame_data_len, 0);
+		return;
+	}
+
+	/* Allocate new skb here */
+	skb = alloc_skb(frame_data_len, GFP_KERNEL);
+	if (skb == NULL) {
+		printk("%s alloc_skb frame_data_len = %d failed\n", __func__,
+		       frame_data_len);
+		return;
+	}
+
+	/* Copy the data */
+	skb_put_data(skb, frame_data, frame_data_len);
+	/* receive */
 	skb->protocol = eth_type_trans(skb, vif->ndev);
 	netif_receive_skb(skb);
 }
@@ -61,13 +182,15 @@ void virtio_wifi_cfg80211_rx(struct virtio_wifi_wiphy *w, u32 ifindex,
 void virtio_wifi_cfg80211_event_dispatch(struct virtio_wifi_wiphy *w, u32 code,
 					 u32 ifindex, void *data, int len)
 {
-	struct virtio_wifi_scan_result *bss;
-	struct virtio_wifi_association_response *assoc_resp;
-	struct virtio_wifi_connection_response *conn_resp;
-	struct virtio_wifi_disconnection_response *disconn_resp;
-	struct wireless_dev *tmp;
+	struct virtio_wifi_scan_result *bss = NULL;
+	struct virtio_wifi_association_response *assoc_resp = NULL;
+	struct virtio_wifi_connection_response *conn_resp = NULL;
+	struct virtio_wifi_disconnection_response *disconn_resp = NULL;
+	struct virtio_wifi_station_change *sta_change = NULL;
+	struct wireless_dev *tmp = NULL;
 	struct virtio_wifi_vif *vif = NULL;
-	size_t ie_len;
+	size_t ie_len = 0;
+	const u8 *ie = NULL;
 
 	wiphy_lock(w->wiphy);
 	rcu_read_lock();
@@ -190,9 +313,8 @@ void virtio_wifi_cfg80211_event_dispatch(struct virtio_wifi_wiphy *w, u32 code,
 		printk("VIRTIO_WIFI_EVENT_CODE_DISCONNECT\n");
 		disconn_resp = data;
 		u16 reason_code = virtio_le_to_cpu(disconn_resp->reason_code);
-		size_t ie_len = virtio_le_to_cpu(disconn_resp->ie_len);
-		const u8 *ie = ie_len > 0 ? (data + sizeof(*disconn_resp)) :
-					    NULL;
+		ie_len = virtio_le_to_cpu(disconn_resp->ie_len);
+		ie = ie_len > 0 ? (data + sizeof(*disconn_resp)) : NULL;
 		wiphy_lock(w->wiphy);
 		virtio_wifi_cfg80211_cancel_scan(w->wiphy);
 		cfg80211_disconnected(vif->ndev, reason_code, ie, ie_len, false,
@@ -204,6 +326,7 @@ void virtio_wifi_cfg80211_event_dispatch(struct virtio_wifi_wiphy *w, u32 code,
 		break;
 	case VIRTIO_WIFI_EVENT_CODE_DISASSOCIATE:
 		printk("VIRTIO_WIFI_EVENT_CODE_DISASSOCIATE\n");
+		// TODO?
 		break;
 	case VIRTIO_WIFI_EVENT_CODE_DEAUTHENTICATE:
 		printk("VIRTIO_WIFI_EVENT_CODE_DEAUTHENTICATE\n");
@@ -212,6 +335,23 @@ void virtio_wifi_cfg80211_event_dispatch(struct virtio_wifi_wiphy *w, u32 code,
 				      (data + sizeof(struct virtio_wifi_event)),
 				      len - sizeof(struct virtio_wifi_event));
 		wiphy_unlock(w->wiphy);
+		break;
+	case VIRTIO_WIFI_EVENT_CODE_NEW_STATION:
+		printk("VIRTIO_WIFI_EVENT_CODE_NEW_STATION\n");
+		sta_change = data;
+		ie_len = virtio_le_to_cpu(sta_change->ie_len);
+		struct station_info *sinfo =
+			kzalloc(sizeof(struct station_info), GFP_KERNEL);
+		ie = ie_len > 0 ? (data + sizeof(*sta_change)) : NULL;
+		sinfo->assoc_req_ies = ie;
+		sinfo->assoc_req_ies_len = ie_len;
+		cfg80211_new_sta(vif->ndev, sta_change->mac, sinfo, GFP_KERNEL);
+		kfree(sinfo);
+		break;
+	case VIRTIO_WIFI_EVENT_CODE_DELETE_STATION:
+		printk("VIRTIO_WIFI_EVENT_CODE_DELETE_STATION\n");
+		sta_change = data;
+		cfg80211_del_sta(vif->ndev, sta_change->mac, GFP_KERNEL);
 		break;
 	default:
 		printk("%s UNHANDLED CODE = %u\n\n\n", __func__, code);
@@ -379,10 +519,10 @@ static struct wireless_dev *virtio_wifi_cfg80211_add_virtual_intf(
 	/* 	return ERR_PTR(-EINVAL); */
 	/* } */
 
-	if (type != NL80211_IFTYPE_STATION) {
+	if (!supported_iftype(type)) {
 		printk("%s: %d is not a supported interface type\n", __func__,
 		       type);
-		return ERR_PTR(-EINVAL);
+		return ERR_PTR(-EOPNOTSUPP);
 	}
 
 	// https://elixir.bootlin.com/linux/v6.12.83/source/drivers/net/wireless/ath/ath6kl/cfg80211.c#L3779
@@ -419,6 +559,30 @@ static int virtio_wifi_cfg80211_del_virtual_intf(struct wiphy *wiphy,
 
 	cfg80211_stop_iface(wiphy, wdev, GFP_KERNEL);
 	cfg80211_unregister_netdevice(vif->ndev);
+	return 0;
+}
+
+static int virtio_wifi_cfg80211_change_virtual_intf(struct wiphy *wiphy,
+						    struct net_device *dev,
+						    enum nl80211_iftype type,
+						    struct vif_params *params)
+{
+	struct virtio_wifi_wiphy *priv = wiphy_priv(wiphy);
+	struct virtio_wifi *virtio_wifi = priv->virtio_wifi;
+	struct virtio_wifi_vif *vif = netdev_priv(dev);
+	int ret = 0;
+
+	if (!supported_iftype(type)) {
+		printk("%s: %d is not a supported interface type\n", __func__,
+		       type);
+		return -EOPNOTSUPP;
+	}
+	ret = virtio_wifi_do_change_interface(virtio_wifi, vif->index, type);
+	if (ret) {
+		return ret;
+	}
+
+	vif->wdev.iftype = type;
 	return 0;
 }
 
@@ -495,56 +659,6 @@ static int virtio_wifi_cfg80211_disconnect(struct wiphy *wiphy,
 	netif_carrier_off(netdev);
 
 	return 0;
-}
-
-/* Called with the rtnl lock held. */
-static int virtio_wifi_cfg80211_get_station(struct wiphy *wiphy,
-					    struct net_device *dev,
-					    const u8 *mac,
-					    struct station_info *sinfo)
-{
-	struct virtio_wifi_vif *vif = netdev_priv(dev);
-
-	printk("%s called\n", __func__);
-	wiphy_debug(wiphy, "get_station\n");
-
-	if (!vif->is_connected)
-		return -ENOENT;
-
-	sinfo->filled = BIT_ULL(NL80211_STA_INFO_TX_PACKETS) |
-			BIT_ULL(NL80211_STA_INFO_TX_FAILED) |
-			BIT_ULL(NL80211_STA_INFO_SIGNAL) |
-			BIT_ULL(NL80211_STA_INFO_TX_BITRATE);
-	sinfo->tx_packets = vif->tx_packets;
-	sinfo->tx_failed = vif->tx_failed;
-	/* For CFG80211_SIGNAL_TYPE_MBM, value is expressed in _dBm_ */
-	sinfo->signal = -50;
-	sinfo->txrate = (struct rate_info){
-		.legacy = 10, /* units are 100kbit/s */
-	};
-	return 0;
-}
-
-/* Called with the rtnl lock held. */
-static int virtio_wifi_cfg80211_dump_station(struct wiphy *wiphy,
-					     struct net_device *dev, int idx,
-					     u8 *mac,
-					     struct station_info *sinfo)
-{
-	struct virtio_wifi_vif *vif = netdev_priv(dev);
-
-	printk("%s called\n", __func__);
-	wiphy_debug(wiphy, "dump_station\n");
-
-	if (idx != 0 || !vif->is_connected)
-		return -ENOENT;
-
-	/* ether_addr_copy(mac, fake_router_bssid); */
-
-	//TODO:
-	return -ENOENT;
-	/* return virtio_wifi_cfg80211_get_station(wiphy, dev, fake_router_bssid, */
-	/* 					sinfo); */
 }
 
 static int virtio_wifi_cfg80211_auth(struct wiphy *wiphy,
@@ -657,10 +771,49 @@ static int virtio_wifi_cfg80211_set_default_key(struct wiphy *wiphy,
 {
 	struct virtio_wifi_vif *vif = netdev_priv(netdev);
 	struct virtio_wifi_wiphy *priv = wiphy_priv(wiphy);
+	printk("%s called key_index=%d unicast=%d multicast=%d\n", __func__,
+	       key_index, unicast, multicast);
+
+	return virtio_wifi_do_set_default_key(priv, vif->index, key_index, true,
+					      unicast, multicast, false);
+}
+
+static int virtio_wifi_cfg80211_get_key(
+	struct wiphy *wiphy, struct net_device *ndev, int link_id, u8 key_idx,
+	bool pairwise, const u8 *mac_addr, void *cookie,
+	void (*callback)(void *cookie, struct key_params *params))
+{
+	struct virtio_wifi_wiphy *priv = wiphy_priv(wiphy);
+	struct key_params params;
+	struct virtio_wifi_vif *vif = netdev_priv(ndev);
+	int err = 0;
+
+	printk("%s called key_idx=%d\n", __func__, key_idx);
+	if (!vif->is_up)
+		return -EIO;
+
+	memset(&params, 0, sizeof(params));
+
+	err = virtio_wifi_do_get_key(priv, vif->index, key_idx, pairwise,
+				     mac_addr, &params);
+	if (err) {
+		return err;
+	}
+
+	callback(cookie, &params);
+	return 0;
+}
+
+static int virtio_wifi_cfg80211_config_default_mgmt_key(struct wiphy *wiphy,
+							struct net_device *ndev,
+							int link_id, u8 key_idx)
+{
+	struct virtio_wifi_vif *vif = netdev_priv(ndev);
+	struct virtio_wifi_wiphy *priv = wiphy_priv(wiphy);
 	printk("%s called\n", __func__);
 
-	return virtio_wifi_do_set_default_key(priv, vif->index, key_index,
-					      unicast, multicast);
+	return virtio_wifi_do_set_default_key(priv, vif->index, key_idx, false,
+					      false, false, true);
 }
 
 static int
@@ -675,17 +828,108 @@ virtio_wifi_cfg80211_change_station(struct wiphy *wiphy, struct net_device *dev,
 	return virtio_wifi_do_change_station(priv, vif->index, mac, params);
 }
 
+static int
+virtio_wifi_cfg80211_del_station(struct wiphy *wiphy, struct net_device *ndev,
+				 struct station_del_parameters *params)
+{
+	printk("%s called\n", __func__);
+	// TODO
+	return 0;
+}
+
+static int virtio_wifi_cfg80211_start_ap(struct wiphy *wiphy,
+					 struct net_device *ndev,
+					 struct cfg80211_ap_settings *settings)
+{
+	struct virtio_wifi_vif *vif = netdev_priv(ndev);
+	struct virtio_wifi_wiphy *priv = wiphy_priv(wiphy);
+	int ret = 0;
+
+	printk("%s called\n", __func__);
+	ret = virtio_wifi_do_start_ap(priv->virtio_wifi, vif->index, settings);
+	if (ret) {
+		return ret;
+	}
+	vif->is_connected = true;
+	netif_carrier_on(vif->ndev);
+	netif_wake_queue(vif->ndev);
+	return 0;
+}
+
+static int virtio_wifi_cfg80211_stop_ap(struct wiphy *wiphy,
+					struct net_device *ndev,
+					unsigned int link_id)
+{
+	/* struct virtio_wifi_vif *vif = netdev_priv(ndev); */
+	/* struct virtio_wifi_wiphy *priv = wiphy_priv(wiphy); */
+
+	printk("%s called\n", __func__);
+	/* return virtio_wifi_do_start_ap(priv->virtio_wifi, vif->index, settings); */
+	// TODO
+	return 0;
+}
+
+static int virtio_wifi_cfg80211_change_beacon(struct wiphy *wiphy,
+					      struct net_device *ndev,
+					      struct cfg80211_ap_update *info)
+{
+	printk("%s called\n", __func__);
+	// TODO
+	return 0;
+}
+
+static int virtio_wifi_cfg80211_mgmt_tx(struct wiphy *wiphy,
+					struct wireless_dev *wdev,
+					struct cfg80211_mgmt_tx_params *params,
+					u64 *cookie)
+{
+	const u8 *buf = params->buf;
+	size_t len = params->len;
+	struct virtio_wifi_wiphy *priv = wiphy_priv(wiphy);
+	const struct ieee80211_mgmt *mgmt = (const struct ieee80211_mgmt *)buf;
+	struct sk_buff *skb = NULL;
+	struct virtio_wifi_vif *vif =
+		container_of(wdev, struct virtio_wifi_vif, wdev);
+	int ret = 0;
+
+	*cookie = 0;
+	if (!ieee80211_is_mgmt(mgmt->frame_control)) {
+		printk("Driver only allows MGMT packet type\n");
+		return -EOPNOTSUPP;
+	}
+	skb_put_data(skb, buf, len);
+	ret = virtio_wifi_do_tx(priv, vif->index, skb, false);
+
+	if (ret) {
+		return ret;
+	}
+	cfg80211_mgmt_tx_status(wdev, *cookie, buf, len, true, GFP_KERNEL);
+	return ret;
+}
+
+static void virtio_wifi_cfg80211_update_mgmt_frame_registrations(
+	struct wiphy *wiphy, struct wireless_dev *wdev,
+	struct mgmt_frame_regs *upd)
+{
+	struct virtio_wifi_vif *vif =
+		container_of(wdev, struct virtio_wifi_vif, wdev);
+
+	printk("%s called %d\n", __func__, upd->interface_stypes);
+	vif->mgmt_rx_reg = upd->interface_stypes;
+	return;
+}
+
 static const struct cfg80211_ops virtio_wifi_cfg80211_cfg80211_ops = {
 	.add_virtual_intf = virtio_wifi_cfg80211_add_virtual_intf,
 	.del_virtual_intf = virtio_wifi_cfg80211_del_virtual_intf,
+	.change_virtual_intf = virtio_wifi_cfg80211_change_virtual_intf,
 	.scan = virtio_wifi_cfg80211_scan,
 
 	.connect = virtio_wifi_cfg80211_connect,
 	.disconnect = virtio_wifi_cfg80211_disconnect,
 
-	/* .get_station = virtio_wifi_cfg80211_get_station, */
-	/* .dump_station = virtio_wifi_cfg80211_dump_station, */
 	.change_station = virtio_wifi_cfg80211_change_station,
+	.del_station = virtio_wifi_cfg80211_del_station,
 	.auth = virtio_wifi_cfg80211_auth,
 	.assoc = virtio_wifi_cfg80211_assoc,
 	.deauth = virtio_wifi_cfg80211_deauth,
@@ -693,6 +937,14 @@ static const struct cfg80211_ops virtio_wifi_cfg80211_cfg80211_ops = {
 	.add_key = virtio_wifi_cfg80211_add_key,
 	.del_key = virtio_wifi_cfg80211_del_key,
 	.set_default_key = virtio_wifi_cfg80211_set_default_key,
+	.get_key = virtio_wifi_cfg80211_get_key,
+	.set_default_mgmt_key = virtio_wifi_cfg80211_config_default_mgmt_key,
+	.start_ap = virtio_wifi_cfg80211_start_ap,
+	.stop_ap = virtio_wifi_cfg80211_stop_ap,
+	.change_beacon = virtio_wifi_cfg80211_change_beacon,
+	.mgmt_tx = virtio_wifi_cfg80211_mgmt_tx,
+	.update_mgmt_frame_registrations =
+		virtio_wifi_cfg80211_update_mgmt_frame_registrations,
 };
 
 /* Acquires and releases the rtnl lock. */
@@ -710,13 +962,25 @@ virtio_wifi_cfg80211_make_wiphy(struct virtio_wifi *virtio_wifi)
 	virtio_cread_le(virtio_wifi->virtio_dev, struct virtio_wifi_config,
 			flags, &flags);
 
-	if ((flags & VIRTIO_WIFI_RADIO_F_AUTHENTICATE) == 0) {
+	if (!virtio_has_feature(virtio_wifi->virtio_dev, VIRTIO_WIFI_F_AUTHENTICATE)) {
 		ops->auth = NULL;
 		ops->deauth = NULL;
 	}
-	if ((flags & VIRTIO_WIFI_RADIO_F_CONNECT) == 0) {
+	if (!virtio_has_feature(virtio_wifi->virtio_dev, VIRTIO_WIFI_F_CONNECT)) {
 		ops->connect = NULL;
 		ops->disconnect = NULL;
+	}
+	if (!virtio_has_feature(virtio_wifi->virtio_dev, VIRTIO_WIFI_F_CHANGE_INTERFACE)) {
+		ops->change_virtual_intf = NULL;
+	}
+	if (!virtio_has_feature(virtio_wifi->virtio_dev, VIRTIO_WIFI_F_START_AP)) {
+		ops->start_ap = NULL;
+		ops->stop_ap = NULL;
+	}
+	if (!virtio_has_feature(virtio_wifi->virtio_dev, VIRTIO_WIFI_F_REGISTER_FRAME)) {
+		ops->mgmt_tx = NULL;
+		/* ops->mgmt_tx_cancel_wait = NULL; */
+		ops->update_mgmt_frame_registrations = NULL;
 	}
 
 	wiphy = wiphy_new(ops, sizeof(*priv));
@@ -733,6 +997,10 @@ virtio_wifi_cfg80211_make_wiphy(struct virtio_wifi *virtio_wifi)
 	mutex_init(&priv->mutex);
 	priv->virtio_wifi = virtio_wifi;
 
+	wiphy->flags = ((flags & VIRTIO_WIFI_FLAG_AP_SME)) ?
+			       WIPHY_FLAG_HAVE_AP_SME :
+			       0;
+	wiphy->mgmt_stypes = virtio_wifi_mgmt_stypes;
 	wiphy->max_scan_ssids = 4;
 	wiphy->max_scan_ie_len = 1000;
 	wiphy->signal_type = CFG80211_SIGNAL_TYPE_MBM;
@@ -755,6 +1023,7 @@ virtio_wifi_cfg80211_make_wiphy(struct virtio_wifi *virtio_wifi)
 			continue;
 		}
 		err = virtio_wifi_get_band(virtio_wifi, band_kind, &band);
+		// FIXME: put number of bands in wiphy cfg
 		if (err)
 			continue;
 
@@ -833,7 +1102,8 @@ virtio_wifi_cfg80211_make_wiphy(struct virtio_wifi *virtio_wifi)
 		wiphy->bands[band_kind] = sband;
 	}
 
-	wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION);
+	wiphy->interface_modes = BIT(NL80211_IFTYPE_STATION) |
+				 BIT(NL80211_IFTYPE_AP);
 	virtio_cread_le(virtio_wifi->virtio_dev, struct virtio_wifi_config,
 			available_antennas_tx, &wiphy->available_antennas_tx);
 	virtio_cread_le(virtio_wifi->virtio_dev, struct virtio_wifi_config,
